@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: assistent_esportiu
+      POSTGRES_USER: assistent
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistent -d assistent_esportiu"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrations:
+    image: postgres:16-alpine
+    env_file: .env
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./apps/api/migrations:/migrations:ro
+    command: ["sh", "-c", "for file in /migrations/*.sql; do psql -h postgres -U assistent -d assistent_esportiu -f \"$$file\"; done"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: ./apps/api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://assistent:${POSTGRES_PASSWORD}@postgres:5432/assistent_esportiu
+    depends_on:
+      migrations:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  web:
+    build: ./apps/web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:8088:80"
+
+volumes:
+  postgres_data:
