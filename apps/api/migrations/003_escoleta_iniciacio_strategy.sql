@@ -32,3 +32,11 @@ SET content = jsonb_build_object(
 )
 WHERE content->>'key' = 'category-escoleta-v1'
   AND content->>'status' = 'pending_official_programming';
+
+-- La estrategia se asocia a Escoleta, no a una categoría de iniciación histórica.
+UPDATE strategy_contexts sc
+SET category_id = c.id
+FROM categories c
+WHERE sc.content->>'key' = 'category-escoleta-v1'
+  AND c.name = 'Escoleta'
+  AND sc.category_id IS DISTINCT FROM c.id;

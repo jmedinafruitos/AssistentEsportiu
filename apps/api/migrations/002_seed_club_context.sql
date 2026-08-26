@@ -93,6 +93,7 @@ SELECT 'category', c.id,
     )
   END
 FROM categories c
-WHERE NOT EXISTS (
+WHERE c.name IN ('Escoleta', 'Prebenjamín', 'Benjamín', 'Alevín', 'Infantil', 'Juvenil', 'Júnior')
+  AND NOT EXISTS (
   SELECT 1 FROM strategy_contexts sc WHERE sc.content->>'key' = 'category-' || lower(replace(replace(c.name, 'í', 'i'), 'ú', 'u')) || '-v1'
 );
