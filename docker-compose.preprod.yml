@@ -21,7 +21,7 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./apps/api/migrations:/migrations:ro
-    command: ["sh", "-c", "for file in /migrations/*.sql; do psql -h postgres -U assistent -d assistent_esportiu -f \"$$file\"; done"]
+    command: ["sh", "-c", "for file in /migrations/*.sql; do psql -v ON_ERROR_STOP=1 -h postgres -U assistent -d assistent_esportiu -f \"$$file\"; done"]
     depends_on:
       postgres:
         condition: service_healthy

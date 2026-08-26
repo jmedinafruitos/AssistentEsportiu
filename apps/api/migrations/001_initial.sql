@@ -5,7 +5,7 @@ EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   email TEXT UNIQUE NOT NULL,
@@ -14,7 +14,7 @@ CREATE TABLE users (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE categories (
+CREATE TABLE IF NOT EXISTS categories (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT UNIQUE NOT NULL,
   age_from SMALLINT,
@@ -22,7 +22,7 @@ CREATE TABLE categories (
   active BOOLEAN NOT NULL DEFAULT true
 );
 
-CREATE TABLE teams (
+CREATE TABLE IF NOT EXISTS teams (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   category_id UUID NOT NULL REFERENCES categories(id),
@@ -30,13 +30,13 @@ CREATE TABLE teams (
   active BOOLEAN NOT NULL DEFAULT true
 );
 
-CREATE TABLE team_assignments (
+CREATE TABLE IF NOT EXISTS team_assignments (
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   team_id UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
   PRIMARY KEY (user_id, team_id)
 );
 
-CREATE TABLE strategy_contexts (
+CREATE TABLE IF NOT EXISTS strategy_contexts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   scope TEXT NOT NULL CHECK (scope IN ('club', 'category', 'team')),
   category_id UUID REFERENCES categories(id),
@@ -47,7 +47,7 @@ CREATE TABLE strategy_contexts (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE team_plans (
+CREATE TABLE IF NOT EXISTS team_plans (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   team_id UUID NOT NULL REFERENCES teams(id),
   season TEXT NOT NULL,
@@ -56,7 +56,7 @@ CREATE TABLE team_plans (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE team_records (
+CREATE TABLE IF NOT EXISTS team_records (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   team_id UUID NOT NULL REFERENCES teams(id),
   record_type TEXT NOT NULL CHECK (record_type IN ('training', 'match')),
