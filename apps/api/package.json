@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "test:preprod": "node tests/jme6-preprod.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
@@ -23,4 +24,3 @@
     "typescript": "^5.7.0"
   }
 }
-
