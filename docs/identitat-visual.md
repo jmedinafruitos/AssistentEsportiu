@@ -6,8 +6,10 @@ Esta guía es obligatoria para cualquier pantalla, documento y comunicación cre
 
 - **Nombre visible:** HC Sentmenat.
 - **Producto:** Assistent Esportiu.
-- **Logotipo:** `apps/web/public/hc-sentmenat-logo.png`.
-- El logotipo debe conservar su proporción, no debe recolorearse ni utilizarse sobre fondos que reduzcan su legibilidad.
+- **Escudo maestro vectorial:** `assets/brand/escut-vectoritzat.pdf`.
+- **Recurso de compatibilidad para la PWA:** `apps/web/public/hc-sentmenat-logo.png`.
+- Cualquier nuevo diseño, documento o recurso visual debe partir del escudo maestro vectorial. El PNG solo se usa cuando la plataforma no permite un recurso vectorial.
+- El escudo debe conservar su proporción, no debe recolorearse, recortarse ni deformarse, y no debe utilizarse sobre fondos que reduzcan su legibilidad.
 
 ## Colores
 
