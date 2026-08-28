@@ -7,11 +7,12 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
+    "test:preprod": "node tests/jme6-preprod.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",
-    "@fastify/jwt": "^9.0.0",
+    "@fastify/jwt": "^10.2.2",
     "fastify": "^5.2.0",
     "pg": "^8.13.0",
     "zod": "^3.24.0"
@@ -23,4 +24,3 @@
     "typescript": "^5.7.0"
   }
 }
-

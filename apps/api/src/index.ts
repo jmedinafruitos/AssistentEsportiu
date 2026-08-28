@@ -24,15 +24,57 @@ app.get("/health", async () => {
 app.get("/v1/me", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
   const identity = request.user as { sub: string };
   const result = await db.query(
-    `SELECT u.id, u.name, u.email, u.role, COALESCE(json_agg(t.name) FILTER (WHERE t.id IS NOT NULL), '[]') AS teams
+    `SELECT u.id, u.name, u.email, u.role, u.sport_role, u.global_access,
+       COALESCE((
+         SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'season', t.season) ORDER BY t.name)
+         FROM teams t
+         WHERE t.active = true
+           AND (u.global_access OR EXISTS (
+             SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id
+           ))
+       ), '[]') AS teams
      FROM users u
-     LEFT JOIN team_assignments ta ON ta.user_id = u.id
-     LEFT JOIN teams t ON t.id = ta.team_id
-     WHERE u.id = $1
-     GROUP BY u.id`,
+     WHERE u.id = $1 AND u.active = true`,
     [identity.sub],
   );
-  if (!result.rowCount) return { message: "User not found" };
+  if (!result.rowCount) return replyNotFound();
+  return result.rows[0];
+});
+
+const replyNotFound = () => ({ message: "User not found" });
+
+app.get("/v1/teams", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
+  const identity = request.user as { sub: string };
+  const result = await db.query(
+    `SELECT t.id, t.name, t.season, c.name AS category
+     FROM users u
+     JOIN teams t ON t.active = true
+       AND (u.global_access OR EXISTS (
+         SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id
+       ))
+     JOIN categories c ON c.id = t.category_id
+     WHERE u.id = $1 AND u.active = true
+     ORDER BY t.name`,
+    [identity.sub],
+  );
+  return { teams: result.rows };
+});
+
+app.get("/v1/teams/:teamId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const result = await db.query(
+    `SELECT t.id, t.name, t.season, c.name AS category
+     FROM users u
+     JOIN teams t ON t.id = $2 AND t.active = true
+       AND (u.global_access OR EXISTS (
+         SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id
+       ))
+     JOIN categories c ON c.id = t.category_id
+     WHERE u.id = $1 AND u.active = true`,
+    [identity.sub, teamId],
+  );
+  if (!result.rowCount) return reply.code(403).send({ message: "Forbidden" });
   return result.rows[0];
 });
 
