@@ -10,6 +10,7 @@ test("provides authenticated team-aware Catalan conversation controls", () => {
   assert.match(source, /Equip actiu/);
   assert.match(source, /api\.chat/);
   assert.match(source, /api\.createRecord/);
+  assert.match(source, /coordinatorOverview/);
   assert.match(source, /Què vols treballar avui/);
 });
 

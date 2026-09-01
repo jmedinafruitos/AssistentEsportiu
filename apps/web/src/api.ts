@@ -13,6 +13,10 @@ export type TeamRecord = {
   content: { summary: string; outcome?: string | null; nextObjectives?: string[] };
   created_at: string; created_by_name?: string;
 };
+export type CoordinatorOverview = {
+  teams: Array<Team & { staff_count: number; record_count: number; last_activity_at: string | null }>;
+  pendingProposals: Array<{ id: string; reason: string; proposed_at: string; proposed_by_name: string }>;
+};
 
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
@@ -38,4 +42,5 @@ export const api = {
   records: (token: string, teamId: string) => request<{ records: TeamRecord[] }>(`/v1/teams/${teamId}/records`, {}, token),
   createRecord: (token: string, teamId: string, record: { type: "training" | "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }) =>
     request<TeamRecord>(`/v1/teams/${teamId}/records`, { method: "POST", body: JSON.stringify(record) }, token),
+  coordinatorOverview: (token: string) => request<CoordinatorOverview>("/v1/coordinator/overview", {}, token),
 };

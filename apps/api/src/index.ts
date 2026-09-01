@@ -149,6 +149,7 @@ app.patch("/v1/strategy-contexts/:contextId", { onRequest: [async (request) => r
   const body = z.object({
     content: z.record(z.unknown()),
     version: z.number().int().positive(),
+    confirm: z.literal(true),
   }).parse(request.body);
 
   const client = await db.connect();
@@ -199,6 +200,88 @@ app.patch("/v1/strategy-contexts/:contextId", { onRequest: [async (request) => r
   } finally {
     client.release();
   }
+});
+
+app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
+  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const teams = await db.query(
+    `SELECT t.id, t.name, t.season, c.name AS category,
+            count(DISTINCT ta.user_id)::int AS staff_count,
+            count(DISTINCT tr.id)::int AS record_count,
+            max(tr.happened_at) AS last_activity_at
+     FROM teams t JOIN categories c ON c.id = t.category_id
+     LEFT JOIN team_assignments ta ON ta.team_id = t.id
+     LEFT JOIN team_records tr ON tr.team_id = t.id
+     WHERE t.active = true
+     GROUP BY t.id, c.name ORDER BY t.name`,
+  );
+  const pending = await db.query(
+    `SELECT p.id, p.strategy_context_id, p.base_version, p.reason, p.proposed_at, u.name AS proposed_by_name
+     FROM strategy_change_proposals p JOIN users u ON u.id = p.proposed_by
+     WHERE p.status = 'pending' ORDER BY p.proposed_at DESC`,
+  );
+  return { teams: teams.rows, pendingProposals: pending.rows };
+});
+
+app.post("/v1/strategy-contexts/:contextId/proposals", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { contextId } = z.object({ contextId: z.string().uuid() }).parse(request.params);
+  const body = z.object({ content: z.record(z.unknown()), version: z.number().int().positive(), reason: z.string().trim().min(3).max(1_000) }).parse(request.body);
+  const result = await db.query(
+    `INSERT INTO strategy_change_proposals
+       (strategy_context_id, base_version, proposed_content, reason, proposed_by)
+     SELECT sc.id, $3, $4, $5, u.id
+     FROM users u JOIN strategy_contexts sc ON sc.id = $2
+     WHERE u.id = $1 AND u.active = true AND u.global_access = true AND sc.version = $3
+     RETURNING id, strategy_context_id, base_version, proposed_content, reason, status, proposed_at`,
+    [identity.sub, contextId, body.version, body.content, body.reason],
+  );
+  if (!result.rowCount) return reply.code(409).send({ message: "Forbidden or strategy context has changed" });
+  return reply.code(201).send(result.rows[0]);
+});
+
+app.post("/v1/strategy-change-proposals/:proposalId/confirm", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { proposalId } = z.object({ proposalId: z.string().uuid() }).parse(request.params);
+  z.object({ confirm: z.literal(true) }).parse(request.body);
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const proposal = await client.query(
+      `SELECT p.*, sc.content AS current_content, sc.active, sc.version AS current_version
+       FROM strategy_change_proposals p
+       JOIN strategy_contexts sc ON sc.id = p.strategy_context_id
+       JOIN users u ON u.id = $1 AND u.active = true AND u.global_access = true
+       WHERE p.id = $2 AND p.status = 'pending' FOR UPDATE OF p, sc`,
+      [identity.sub, proposalId],
+    );
+    if (!proposal.rowCount) { await client.query("ROLLBACK"); return reply.code(404).send({ message: "Pending proposal not found" }); }
+    const item = proposal.rows[0];
+    if (item.base_version !== item.current_version) {
+      await client.query("UPDATE strategy_change_proposals SET status = 'superseded' WHERE id = $1", [proposalId]);
+      await client.query("COMMIT");
+      return reply.code(409).send({ message: "Strategy context has changed" });
+    }
+    await client.query(
+      `INSERT INTO strategy_context_revisions (strategy_context_id, version, content, active, changed_by)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [item.strategy_context_id, item.current_version, item.current_content, item.active, identity.sub],
+    );
+    const updated = await client.query(
+      `UPDATE strategy_contexts SET content = $2, version = version + 1, updated_by = $3, updated_at = now()
+       WHERE id = $1 RETURNING id, content, version, updated_at`,
+      [item.strategy_context_id, item.proposed_content, identity.sub],
+    );
+    await client.query(
+      `UPDATE strategy_change_proposals SET status = 'applied', confirmed_by = $2, confirmed_at = now() WHERE id = $1`,
+      [proposalId, identity.sub],
+    );
+    await client.query("COMMIT");
+    return { proposalId, context: updated.rows[0] };
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
 });
 
 app.get("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {

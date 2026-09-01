@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ChatMessage, CurrentUser, Team } from "./api";
+import { api, ChatMessage, CoordinatorOverview, CurrentUser, Team } from "./api";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -16,6 +16,7 @@ function App() {
   const [error, setError] = useState("");
   const [recording, setRecording] = useState(false);
   const [notice, setNotice] = useState("");
+  const [overview, setOverview] = useState<CoordinatorOverview | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -56,7 +57,8 @@ function App() {
 
   return <main className="assistant-shell">
     <header className="app-header"><div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div><button className="quiet" onClick={logout}>Sortir</button></header>
-    <section className="identity-card"><div><strong>{user.name}</strong><span>{user.sport_role ?? user.role}</span></div><label>Equip actiu<select value={teamId} onChange={(event) => { setTeamId(event.target.value); setMessages([]); }}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label></section>
+    <section className="identity-card"><div><strong>{user.name}</strong><span>{user.sport_role ?? user.role}</span>{user.global_access && <button className="text-action" onClick={() => { if (overview) setOverview(null); else void api.coordinatorOverview(token).then(setOverview).catch(() => setError("No s'ha pogut carregar la visió global.")); }}>{overview ? "Tancar visió global" : "Visió global"}</button>}</div><label>Equip actiu<select value={teamId} onChange={(event) => { setTeamId(event.target.value); setMessages([]); }}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label></section>
+    {overview && <CoordinatorPanel overview={overview} />}
     <section className="conversation" aria-live="polite">
       {!messages.length && <div className="welcome"><span className="eyebrow">{activeTeam?.category ?? "El teu equip"}</span><h2>Què vols treballar avui?</h2><p>Conversarem amb l'estratègia del club i el context autoritzat de {activeTeam?.name}.</p></div>}
       {messages.map((message) => <article key={message.id} className={`bubble ${message.role}`}><span>{message.role === "assistant" ? "Assistent" : user.name}</span><p>{message.content}</p></article>)}
@@ -68,6 +70,10 @@ function App() {
     {error && <p className="error" role="alert">{error}</p>}
     <Composer disabled={!teamId || loading} onSend={send} />
   </main>;
+}
+
+function CoordinatorPanel({ overview }: { overview: CoordinatorOverview }) {
+  return <section className="overview"><div><span className="eyebrow">Coordinació</span><h2>Activitat de tots els equips</h2></div><div className="team-grid">{overview.teams.map((team) => <article key={team.id}><strong>{team.name}</strong><span>{team.category}</span><p>{team.record_count} registres · {team.staff_count} tècnics</p><small>{team.last_activity_at ? `Darrera activitat: ${new Date(team.last_activity_at).toLocaleDateString("ca")}` : "Encara sense activitat"}</small></article>)}</div>{overview.pendingProposals.length > 0 && <p className="pending">{overview.pendingProposals.length} canvis pendents de confirmació explícita.</p>}</section>;
 }
 
 function RecordCapture({ teamName, onCancel, onSave }: { teamName: string; onCancel: () => void; onSave: (record: { type: "training" | "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }) => Promise<void> }) {
