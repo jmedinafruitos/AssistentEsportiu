@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ChatMessage, CoordinatorOverview, CurrentUser, Team, TeamPlan } from "./api";
+import { api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, Team, TeamPlan } from "./api";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -18,6 +18,7 @@ function App() {
   const [notice, setNotice] = useState("");
   const [overview, setOverview] = useState<CoordinatorOverview | null>(null);
   const [planning, setPlanning] = useState(false);
+  const [results, setResults] = useState<AssistantResult[] | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -62,10 +63,11 @@ function App() {
     {overview && <CoordinatorPanel overview={overview} />}
     <section className="conversation" aria-live="polite">
       {!messages.length && <div className="welcome"><span className="eyebrow">{activeTeam?.category ?? "El teu equip"}</span><h2>Què vols treballar avui?</h2><p>Conversarem amb l'estratègia del club i el context autoritzat de {activeTeam?.name}.</p></div>}
-      {messages.map((message) => <article key={message.id} className={`bubble ${message.role}`}><span>{message.role === "assistant" ? "Assistent" : user.name}</span><p>{message.content}</p></article>)}
+      {messages.map((message) => <article key={message.id} className={`bubble ${message.role}`}><span>{message.role === "assistant" ? "Assistent" : user.name}</span><p>{message.content}</p>{message.role === "assistant" && <button className="speak" onClick={() => speak(message.content)} aria-label="Escoltar resposta">Escoltar</button>}</article>)}
       {loading && <div className="typing" aria-label="L'assistent està escrivint"><i /><i /><i /></div>}
     </section>
-    {!messages.length && <nav className="suggestions" aria-label="Suggeriments">{suggestions.map((item) => <button key={item} onClick={() => send(item)}>{item}</button>)}<button onClick={() => setRecording(true)}>Registrar activitat</button><button onClick={() => setPlanning(true)}>Planificació</button></nav>}
+    {!messages.length && <nav className="suggestions" aria-label="Suggeriments">{suggestions.map((item) => <button key={item} onClick={() => send(item)}>{item}</button>)}<button onClick={() => setRecording(true)}>Registrar activitat</button><button onClick={() => setPlanning(true)}>Planificació</button><button onClick={() => { if (results) setResults(null); else void api.assistantResults(token, teamId).then(({ results: history }) => setResults(history)); }}>Resultats desats</button></nav>}
+    {results && <section className="result-list"><h2>Resultats de l'assistent</h2>{results.length ? results.map((result) => <article key={result.id}><small>{new Date(result.created_at).toLocaleDateString("ca")} · {result.requested_by}</small><strong>{result.user_message}</strong><p>{result.assistant_message}</p><button className="speak" onClick={() => speak(result.assistant_message)}>Escoltar</button></article>) : <p>Encara no hi ha resultats desats.</p>}</section>}
     {recording && <RecordCapture teamName={activeTeam?.name ?? "l'equip"} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, teamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
     {planning && <PlanningEditor token={token} teamId={teamId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
@@ -73,6 +75,8 @@ function App() {
     <Composer disabled={!teamId || loading} onSend={send} />
   </main>;
 }
+
+function speak(content: string) { if (!("speechSynthesis" in window)) return; window.speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(content); utterance.lang = "ca-ES"; window.speechSynthesis.speak(utterance); }
 
 function PlanningEditor({ token, teamId, teamName, onClose }: { token: string; teamId: string; teamName: string; onClose: () => void }) {
   const [plan, setPlan] = useState<TeamPlan | null>(null);
@@ -113,8 +117,16 @@ function Login({ onLogin, loading, error }: { onLogin: (email: string) => Promis
 
 function Composer({ disabled, onSend }: { disabled: boolean; onSend: (message: string) => Promise<void> }) {
   const [message, setMessage] = useState("");
+  const [listening, setListening] = useState(false);
   function submit(event: FormEvent) { event.preventDefault(); if (!message.trim()) return; const value = message; setMessage(""); void onSend(value); }
-  return <form className="composer" onSubmit={submit}><textarea aria-label="Missatge per a l'assistent" rows={1} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Escriu una consulta…" disabled={disabled} /><button aria-label="Enviar" disabled={disabled || !message.trim()}>Enviar</button></form>;
+  function dictate() {
+    const SpeechRecognition = (window as typeof window & { SpeechRecognition?: new () => { lang: string; start(): void; onresult: (event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void; onend: () => void; onerror: () => void } }).SpeechRecognition
+      ?? (window as typeof window & { webkitSpeechRecognition?: new () => { lang: string; start(): void; onresult: (event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void; onend: () => void; onerror: () => void } }).webkitSpeechRecognition;
+    if (!SpeechRecognition) return;
+    const recognition = new SpeechRecognition(); recognition.lang = "ca-ES"; setListening(true);
+    recognition.onresult = (event) => setMessage(event.results[0]?.[0].transcript ?? ""); recognition.onend = () => setListening(false); recognition.onerror = () => setListening(false); recognition.start();
+  }
+  return <form className="composer" onSubmit={submit}><button type="button" className="voice" onClick={dictate} disabled={disabled} aria-label="Dictar missatge">{listening ? "Escoltant…" : "Micròfon"}</button><textarea aria-label="Missatge per a l'assistent" rows={1} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Escriu o dicta una consulta…" disabled={disabled} /><button aria-label="Enviar" disabled={disabled || !message.trim()}>Enviar</button></form>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);

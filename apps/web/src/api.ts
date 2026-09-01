@@ -18,6 +18,7 @@ export type CoordinatorOverview = {
   pendingProposals: Array<{ id: string; reason: string; proposed_at: string; proposed_by_name: string }>;
 };
 export type TeamPlan = { id: string; season: string; version: number; content: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string } };
+export type AssistantResult = { id: string; user_message: string; assistant_message: string; created_at: string; requested_by: string };
 
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
@@ -46,4 +47,5 @@ export const api = {
   coordinatorOverview: (token: string) => request<CoordinatorOverview>("/v1/coordinator/overview", {}, token),
   plan: (token: string, teamId: string) => request<{ plan: TeamPlan | null }>(`/v1/teams/${teamId}/plan`, {}, token),
   savePlan: (token: string, teamId: string, plan: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string; version?: number }) => request<TeamPlan>(`/v1/teams/${teamId}/plan`, { method: "PUT", body: JSON.stringify(plan) }, token),
+  assistantResults: (token: string, teamId: string) => request<{ results: AssistantResult[] }>(`/v1/teams/${teamId}/assistant-results`, {}, token),
 };

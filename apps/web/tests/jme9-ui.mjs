@@ -12,6 +12,8 @@ test("provides authenticated team-aware Catalan conversation controls", () => {
   assert.match(source, /api\.createRecord/);
   assert.match(source, /coordinatorOverview/);
   assert.match(source, /PlanningEditor/);
+  assert.match(source, /SpeechRecognition/);
+  assert.match(source, /assistantResults/);
   assert.match(source, /Què vols treballar avui/);
 });
 

@@ -456,6 +456,23 @@ app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, as
   }
 });
 
+app.get("/v1/teams/:teamId/assistant-results", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const result = await db.query(
+    `SELECT ai.id, ai.user_message, ai.assistant_message, ai.created_at, u.name AS requested_by
+     FROM users viewer
+     JOIN teams t ON t.id = $2 AND t.active = true
+       AND (viewer.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = viewer.id AND ta.team_id = t.id))
+     JOIN ai_interactions ai ON ai.team_id = t.id
+     JOIN users u ON u.id = ai.user_id
+     WHERE viewer.id = $1 AND viewer.active = true
+     ORDER BY ai.created_at DESC LIMIT 30`,
+    [identity.sub, teamId],
+  );
+  return { results: result.rows };
+});
+
 app.post("/v1/session", async (request, reply) => {
   const body = z.object({ email: z.string().email() }).parse(request.body);
   const result = await db.query("SELECT id, role FROM users WHERE email = $1 AND active = true", [body.email]);
