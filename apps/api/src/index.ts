@@ -329,6 +329,50 @@ app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.j
   return reply.code(201).send(result.rows[0]);
 });
 
+app.get("/v1/teams/:teamId/plan", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const result = await db.query(
+    `SELECT tp.id, tp.team_id, tp.season, tp.content, tp.version, tp.updated_at
+     FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     LEFT JOIN team_plans tp ON tp.team_id = t.id AND tp.season = t.season
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+    [identity.sub, teamId],
+  );
+  if (!result.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  return { plan: result.rows[0].id ? result.rows[0] : null };
+});
+
+app.put("/v1/teams/:teamId/plan", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    seasonObjectives: z.array(z.string().trim().min(1).max(300)).min(1).max(20),
+    nextTrainingObjectives: z.array(z.string().trim().min(1).max(300)).max(10).default([]),
+    notes: z.string().trim().max(4_000).default(""),
+    version: z.number().int().positive().optional(),
+  }).parse(request.body);
+  const result = await db.query(
+    `INSERT INTO team_plans (team_id, season, content, created_by)
+     SELECT t.id, t.season, $3, u.id
+     FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))
+     ON CONFLICT (team_id, season) DO UPDATE
+       SET content = EXCLUDED.content, version = team_plans.version + 1, updated_at = now()
+       WHERE $4::integer IS NOT NULL AND team_plans.version = $4
+     RETURNING id, team_id, season, content, version, updated_at`,
+    [identity.sub, teamId, {
+      seasonObjectives: body.seasonObjectives,
+      nextTrainingObjectives: body.nextTrainingObjectives,
+      notes: body.notes,
+    }, body.version ?? null],
+  );
+  if (!result.rowCount) return reply.code(body.version ? 409 : 403).send({ message: body.version ? "Plan has changed" : "Forbidden" });
+  return result.rows[0];
+});
+
 app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const body = z.object({
@@ -375,6 +419,11 @@ app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, as
      ORDER BY happened_at DESC, created_at DESC LIMIT 10`,
     [actor.id],
   );
+  const activePlan = await db.query(
+    `SELECT season, content, version, updated_at FROM team_plans
+     WHERE team_id = $1 AND season = $2 LIMIT 1`,
+    [actor.id, actor.season],
+  );
 
   try {
     const result = await ai.reply({
@@ -388,6 +437,7 @@ app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, as
         },
         strategyContexts: contexts.rows,
         recentRecords: recentRecords.rows,
+        activePlan: activePlan.rows[0] ?? null,
       },
       message: body.message,
       history: body.history,

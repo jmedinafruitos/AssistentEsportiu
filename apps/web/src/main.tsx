@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, ChatMessage, CoordinatorOverview, CurrentUser, Team } from "./api";
+import { api, ChatMessage, CoordinatorOverview, CurrentUser, Team, TeamPlan } from "./api";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -17,6 +17,7 @@ function App() {
   const [recording, setRecording] = useState(false);
   const [notice, setNotice] = useState("");
   const [overview, setOverview] = useState<CoordinatorOverview | null>(null);
+  const [planning, setPlanning] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -64,12 +65,26 @@ function App() {
       {messages.map((message) => <article key={message.id} className={`bubble ${message.role}`}><span>{message.role === "assistant" ? "Assistent" : user.name}</span><p>{message.content}</p></article>)}
       {loading && <div className="typing" aria-label="L'assistent està escrivint"><i /><i /><i /></div>}
     </section>
-    {!messages.length && <nav className="suggestions" aria-label="Suggeriments">{suggestions.map((item) => <button key={item} onClick={() => send(item)}>{item}</button>)}<button onClick={() => setRecording(true)}>Registrar activitat</button></nav>}
+    {!messages.length && <nav className="suggestions" aria-label="Suggeriments">{suggestions.map((item) => <button key={item} onClick={() => send(item)}>{item}</button>)}<button onClick={() => setRecording(true)}>Registrar activitat</button><button onClick={() => setPlanning(true)}>Planificació</button></nav>}
     {recording && <RecordCapture teamName={activeTeam?.name ?? "l'equip"} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, teamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
+    {planning && <PlanningEditor token={token} teamId={teamId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
     <Composer disabled={!teamId || loading} onSend={send} />
   </main>;
+}
+
+function PlanningEditor({ token, teamId, teamName, onClose }: { token: string; teamId: string; teamName: string; onClose: () => void }) {
+  const [plan, setPlan] = useState<TeamPlan | null>(null);
+  const [seasonObjectives, setSeasonObjectives] = useState("");
+  const [trainingObjectives, setTrainingObjectives] = useState("");
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { void api.plan(token, teamId).then(({ plan: loaded }) => { setPlan(loaded); setSeasonObjectives(loaded?.content.seasonObjectives.join("\n") ?? ""); setTrainingObjectives(loaded?.content.nextTrainingObjectives.join("\n") ?? ""); setNotes(loaded?.content.notes ?? ""); }).catch(() => setError("No s'ha pogut carregar la planificació.")); }, [token, teamId]);
+  const lines = (value: string) => value.split("\n").map((item) => item.trim()).filter(Boolean);
+  async function submit(event: FormEvent) { event.preventDefault(); setSaving(true); setError(""); try { const saved = await api.savePlan(token, teamId, { seasonObjectives: lines(seasonObjectives), nextTrainingObjectives: lines(trainingObjectives), notes, version: plan?.version }); setPlan(saved); onClose(); } catch { setError("La planificació ha canviat o no s'ha pogut desar."); setSaving(false); } }
+  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true"><h2>Planificació · {teamName}</h2><form onSubmit={submit}><label>Objectius de temporada<textarea required value={seasonObjectives} onChange={(event) => setSeasonObjectives(event.target.value)} placeholder="Un objectiu per línia" /></label><label>Objectius dels pròxims entrenaments<textarea value={trainingObjectives} onChange={(event) => setTrainingObjectives(event.target.value)} placeholder="Un objectiu per línia" /></label><label>Notes<textarea value={notes} onChange={(event) => setNotes(event.target.value)} /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Cancel·lar</button><button disabled={saving || !lines(seasonObjectives).length}>{saving ? "Desant…" : "Desar pla"}</button></div></form></section></div>;
 }
 
 function CoordinatorPanel({ overview }: { overview: CoordinatorOverview }) {
