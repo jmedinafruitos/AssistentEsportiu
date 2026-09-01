@@ -3,15 +3,24 @@ import jwt from "@fastify/jwt";
 import Fastify from "fastify";
 import { Pool } from "pg";
 import { z } from "zod";
+import { ConfigurableAiService } from "./ai.js";
 
 const env = z.object({
   DATABASE_URL: z.string().url(),
   JWT_SECRET: z.string().min(32),
   PORT: z.coerce.number().default(3000),
+  AI_API_KEY: z.string().min(1).optional(),
+  AI_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
+  AI_MODEL: z.string().min(1).default("gpt-5-mini"),
 }).parse(process.env);
 
 const app = Fastify({ logger: true });
 const db = new Pool({ connectionString: env.DATABASE_URL });
+const ai = new ConfigurableAiService({
+  apiKey: env.AI_API_KEY,
+  baseUrl: env.AI_BASE_URL,
+  model: env.AI_MODEL,
+});
 
 await app.register(cors, { origin: false });
 await app.register(jwt, { secret: env.JWT_SECRET });
@@ -189,6 +198,76 @@ app.patch("/v1/strategy-contexts/:contextId", { onRequest: [async (request) => r
     throw error;
   } finally {
     client.release();
+  }
+});
+
+app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const body = z.object({
+    teamId: z.string().uuid(),
+    message: z.string().trim().min(1).max(4_000),
+    history: z.array(z.object({
+      role: z.enum(["user", "assistant"]),
+      content: z.string().trim().min(1).max(4_000),
+    })).max(12).optional(),
+  }).parse(request.body);
+
+  if (!ai.configured) {
+    return reply.code(503).send({ message: "AI service is not configured" });
+  }
+
+  const authorized = await db.query(
+    `SELECT u.name, u.role, u.sport_role, t.id, t.name AS team_name, t.season,
+            t.category_id, c.name AS category
+     FROM users u
+     JOIN teams t ON t.id = $2 AND t.active = true
+       AND (u.global_access OR EXISTS (
+         SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id
+       ))
+     JOIN categories c ON c.id = t.category_id
+     WHERE u.id = $1 AND u.active = true`,
+    [identity.sub, body.teamId],
+  );
+  if (!authorized.rowCount) return reply.code(403).send({ message: "Forbidden" });
+
+  const actor = authorized.rows[0] as {
+    name: string; role: string; sport_role: string | null; id: string;
+    team_name: string; season: string; category_id: string; category: string;
+  };
+  const contexts = await db.query(
+    `SELECT scope, content, version
+     FROM strategy_contexts
+     WHERE active = true AND (scope = 'club' OR category_id = $1 OR team_id = $2)
+     ORDER BY CASE scope WHEN 'club' THEN 1 WHEN 'category' THEN 2 ELSE 3 END`,
+    [actor.category_id, actor.id],
+  );
+
+  try {
+    const result = await ai.reply({
+      context: {
+        user: { name: actor.name, role: actor.role, sportRole: actor.sport_role },
+        team: {
+          id: actor.id,
+          name: actor.team_name,
+          category: actor.category,
+          season: actor.season,
+        },
+        strategyContexts: contexts.rows,
+      },
+      message: body.message,
+      history: body.history,
+    });
+    const stored = await db.query(
+      `INSERT INTO ai_interactions
+         (user_id, team_id, user_message, assistant_message, provider_model)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, created_at`,
+      [identity.sub, actor.id, body.message, result.content, result.model],
+    );
+    return { id: stored.rows[0].id, content: result.content, createdAt: stored.rows[0].created_at };
+  } catch (error) {
+    request.log.error({ err: error, teamId: actor.id }, "AI request failed");
+    return reply.code(502).send({ message: "AI provider unavailable" });
   }
 });
 

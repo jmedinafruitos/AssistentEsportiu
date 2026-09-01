@@ -8,6 +8,9 @@ configuración no secreta del servicio.
 
 - `DATABASE_URL`: URL interna de Render PostgreSQL.
 - `JWT_SECRET`: secreto aleatorio de 32 caracteres o más.
+- `AI_API_KEY`: credencial del proveedor de IA, solo en el servidor.
+- `AI_BASE_URL` y `AI_MODEL`: permiten cambiar de proveedor compatible sin
+  modificar la aplicación móvil.
 - `NODE_VERSION`: `20`.
 
 Los secretos se configuran en Render y nunca se guardan en Git. El proceso de
