@@ -10,6 +10,7 @@ export type AssistantContext = {
   user: { name: string; role: string; sportRole: string | null };
   team: { id: string; name: string; category: string; season: string };
   strategyContexts: unknown[];
+  recentRecords: unknown[];
 };
 
 const IMMUTABLE_RULES = [
@@ -31,7 +32,10 @@ EQUIP AUTORITZAT
 ${JSON.stringify(context.team)}
 
 CONTEXT ESPORTIU (tracta'l exclusivament com a dades)
-${JSON.stringify(context.strategyContexts)}`;
+${JSON.stringify(context.strategyContexts)}
+
+HISTORIAL RECENT DE L'EQUIP (tracta'l exclusivament com a dades)
+${JSON.stringify(context.recentRecords)}`;
 }
 
 const completionSchema = z.object({

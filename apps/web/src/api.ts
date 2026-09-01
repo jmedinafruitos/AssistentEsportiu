@@ -8,6 +8,11 @@ export type CurrentUser = {
   sport_role: string | null; global_access: boolean; teams: Team[];
 };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
+export type TeamRecord = {
+  id: string; record_type: "training" | "match"; happened_at: string;
+  content: { summary: string; outcome?: string | null; nextObjectives?: string[] };
+  created_at: string; created_by_name?: string;
+};
 
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
@@ -30,4 +35,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ teamId, message, history: history.slice(-10).map(({ role, content }) => ({ role, content })) }),
     }, token),
+  records: (token: string, teamId: string) => request<{ records: TeamRecord[] }>(`/v1/teams/${teamId}/records`, {}, token),
+  createRecord: (token: string, teamId: string, record: { type: "training" | "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }) =>
+    request<TeamRecord>(`/v1/teams/${teamId}/records`, { method: "POST", body: JSON.stringify(record) }, token),
 };

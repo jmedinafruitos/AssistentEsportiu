@@ -14,6 +14,8 @@ function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(Boolean(token));
   const [error, setError] = useState("");
+  const [recording, setRecording] = useState(false);
+  const [notice, setNotice] = useState("");
 
   useEffect(() => {
     if (!token) return;
@@ -60,10 +62,27 @@ function App() {
       {messages.map((message) => <article key={message.id} className={`bubble ${message.role}`}><span>{message.role === "assistant" ? "Assistent" : user.name}</span><p>{message.content}</p></article>)}
       {loading && <div className="typing" aria-label="L'assistent està escrivint"><i /><i /><i /></div>}
     </section>
-    {!messages.length && <nav className="suggestions" aria-label="Suggeriments">{suggestions.map((item) => <button key={item} onClick={() => send(item)}>{item}</button>)}</nav>}
+    {!messages.length && <nav className="suggestions" aria-label="Suggeriments">{suggestions.map((item) => <button key={item} onClick={() => send(item)}>{item}</button>)}<button onClick={() => setRecording(true)}>Registrar activitat</button></nav>}
+    {recording && <RecordCapture teamName={activeTeam?.name ?? "l'equip"} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, teamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
+    {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
     <Composer disabled={!teamId || loading} onSend={send} />
   </main>;
+}
+
+function RecordCapture({ teamName, onCancel, onSave }: { teamName: string; onCancel: () => void; onSave: (record: { type: "training" | "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }) => Promise<void> }) {
+  const [type, setType] = useState<"training" | "match">("training");
+  const [summary, setSummary] = useState("");
+  const [outcome, setOutcome] = useState("");
+  const [objectives, setObjectives] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setSaving(true); setError("");
+    try { await onSave({ type, happenedAt: new Date().toISOString(), summary, outcome: outcome || undefined, nextObjectives: objectives.split("\n").map((item) => item.trim()).filter(Boolean) }); }
+    catch { setError("No s'ha pogut desar l'activitat."); setSaving(false); }
+  }
+  return <div className="modal-backdrop" role="presentation"><section className="record-card" role="dialog" aria-modal="true" aria-labelledby="record-title"><h2 id="record-title">Registrar {teamName}</h2><form onSubmit={submit}><label>Tipus<select value={type} onChange={(event) => setType(event.target.value as "training" | "match")}><option value="training">Entrenament</option><option value="match">Partit</option></select></label><label>Resum<textarea required value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="Què heu treballat i com ha anat?" /></label><label>Resultat o valoració<input value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder="Opcional" /></label><label>Pròxims objectius<textarea value={objectives} onChange={(event) => setObjectives(event.target.value)} placeholder="Un objectiu per línia" /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onCancel}>Cancel·lar</button><button disabled={saving}>{saving ? "Desant…" : "Desar"}</button></div></form></section></div>;
 }
 
 function Login({ onLogin, loading, error }: { onLogin: (email: string) => Promise<void>; loading: boolean; error: string }) {

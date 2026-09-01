@@ -201,6 +201,51 @@ app.patch("/v1/strategy-contexts/:contextId", { onRequest: [async (request) => r
   }
 });
 
+app.get("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const allowed = await db.query(
+    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+    [identity.sub, teamId],
+  );
+  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT tr.id, tr.record_type, tr.happened_at, tr.content, tr.created_at,
+            u.name AS created_by_name
+     FROM team_records tr JOIN users u ON u.id = tr.created_by
+     WHERE tr.team_id = $1 ORDER BY tr.happened_at DESC, tr.created_at DESC LIMIT 100`,
+    [teamId],
+  );
+  return { records: result.rows };
+});
+
+app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    type: z.enum(["training", "match"]),
+    happenedAt: z.string().datetime(),
+    summary: z.string().trim().min(1).max(2_000),
+    outcome: z.string().trim().max(500).optional(),
+    nextObjectives: z.array(z.string().trim().min(1).max(300)).max(10).default([]),
+  }).parse(request.body);
+  const result = await db.query(
+    `INSERT INTO team_records (team_id, record_type, happened_at, content, created_by)
+     SELECT t.id, $3, $4, $5, u.id
+     FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))
+     RETURNING id, record_type, happened_at, content, created_at`,
+    [identity.sub, teamId, body.type, body.happenedAt, {
+      summary: body.summary, outcome: body.outcome ?? null, nextObjectives: body.nextObjectives,
+    }],
+  );
+  if (!result.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  return reply.code(201).send(result.rows[0]);
+});
+
 app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const body = z.object({
@@ -241,6 +286,12 @@ app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, as
      ORDER BY CASE scope WHEN 'club' THEN 1 WHEN 'category' THEN 2 ELSE 3 END`,
     [actor.category_id, actor.id],
   );
+  const recentRecords = await db.query(
+    `SELECT record_type, happened_at, content
+     FROM team_records WHERE team_id = $1
+     ORDER BY happened_at DESC, created_at DESC LIMIT 10`,
+    [actor.id],
+  );
 
   try {
     const result = await ai.reply({
@@ -253,6 +304,7 @@ app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, as
           season: actor.season,
         },
         strategyContexts: contexts.rows,
+        recentRecords: recentRecords.rows,
       },
       message: body.message,
       history: body.history,
