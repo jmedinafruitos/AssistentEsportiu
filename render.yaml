@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: assistentesportiu
+    runtime: node
+    region: frankfurt
+    plan: starter
+    buildCommand: npm ci && npm run build --workspace @assistent-esportiu/api
+    startCommand: npm run start --workspace @assistent-esportiu/api
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
