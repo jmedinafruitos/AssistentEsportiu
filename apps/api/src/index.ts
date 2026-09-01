@@ -12,6 +12,7 @@ const env = z.object({
   AI_API_KEY: z.string().min(1).optional(),
   AI_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   AI_MODEL: z.string().min(1).default("gpt-5-mini"),
+  WEB_ORIGIN: z.string().url().optional(),
 }).parse(process.env);
 
 const app = Fastify({ logger: true });
@@ -22,7 +23,7 @@ const ai = new ConfigurableAiService({
   model: env.AI_MODEL,
 });
 
-await app.register(cors, { origin: false });
+await app.register(cors, { origin: env.WEB_ORIGIN ?? false });
 await app.register(jwt, { secret: env.JWT_SECRET });
 
 app.get("/health", async () => {

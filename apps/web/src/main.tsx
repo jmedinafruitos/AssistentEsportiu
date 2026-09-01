@@ -130,3 +130,9 @@ function Composer({ disabled, onSend }: { disabled: boolean; onSend: (message: s
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/service-worker.js").then((registration) => registration.update());
+  });
+}

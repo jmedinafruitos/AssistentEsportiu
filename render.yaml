@@ -21,3 +21,17 @@ services:
         value: https://api.openai.com/v1
       - key: AI_MODEL
         value: gpt-5-mini
+      - key: WEB_ORIGIN
+        value: https://assistentesportiu-app.onrender.com
+  - type: web
+    name: assistentesportiu-app
+    runtime: static
+    buildCommand: npm ci && npm run build --workspace @assistent-esportiu/web
+    staticPublishPath: apps/web/dist
+    envVars:
+      - key: VITE_API_URL
+        value: https://assistentesportiu.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
