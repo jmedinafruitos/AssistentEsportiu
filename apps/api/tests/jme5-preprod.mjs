@@ -52,7 +52,7 @@ const clubContext = coachResult.body.contexts.find((context) => context.scope ==
 const forbiddenUpdate = await request(`/v1/strategy-contexts/${clubContext.id}`, {
   method: "PATCH",
   headers: { authorization: `Bearer ${coachToken}`, "content-type": "application/json" },
-  body: JSON.stringify({ content: clubContext.content, version: clubContext.version }),
+  body: JSON.stringify({ content: clubContext.content, version: clubContext.version, confirm: true }),
 });
 assert.equal(forbiddenUpdate.response.status, 403, "coach must not update strategy context");
 
