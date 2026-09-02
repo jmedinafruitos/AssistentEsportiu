@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 const baseUrl = process.env.API_BASE_URL ?? "http://127.0.0.1:3000";
+const passwords = JSON.parse(process.env.TEST_ACCOUNT_PASSWORDS ?? "{}");
 
 async function request(path, options = {}) {
   const response = await fetch(`${baseUrl}${path}`, options);
@@ -9,10 +10,12 @@ async function request(path, options = {}) {
 }
 
 async function authenticate(email) {
+  const password = passwords[email];
+  if (!password) throw new Error(`Missing password for ${email} in TEST_ACCOUNT_PASSWORDS`);
   const { response, body } = await request("/v1/session", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, password }),
   });
   assert.equal(response.status, 200, `session failed for ${email}`);
   return body.token;

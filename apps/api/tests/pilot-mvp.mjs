@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 
 const baseUrl = process.env.PILOT_API_URL?.replace(/\/$/, "");
 const email = process.env.PILOT_EMAIL;
-if (!baseUrl || !email) throw new Error("Set PILOT_API_URL and PILOT_EMAIL");
+const password = process.env.PILOT_PASSWORD;
+if (!baseUrl || !email || !password) throw new Error("Set PILOT_API_URL, PILOT_EMAIL and PILOT_PASSWORD");
 
 async function request(path, options = {}, token) {
   const response = await fetch(`${baseUrl}${path}`, {
@@ -16,7 +17,7 @@ async function request(path, options = {}, token) {
 
 const health = await request("/health");
 assert.equal(health.status, "ok");
-const session = await request("/v1/session", { method: "POST", body: JSON.stringify({ email }) });
+const session = await request("/v1/session", { method: "POST", body: JSON.stringify({ email, password }) });
 const me = await request("/v1/me", {}, session.token);
 const { teams } = await request("/v1/teams", {}, session.token);
 assert.ok(teams.length, "Pilot user needs at least one authorized team");
