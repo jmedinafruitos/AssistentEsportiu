@@ -7,8 +7,8 @@
     "dev:api": "npm run dev --workspace @assistent-esportiu/api",
     "dev:web": "npm run dev --workspace @assistent-esportiu/web",
     "build": "npm run build --workspaces",
-    "typecheck": "npm run typecheck --workspaces"
+    "typecheck": "npm run typecheck --workspaces",
+    "test:pilot": "node apps/api/tests/pilot-mvp.mjs"
   },
   "engines": { "node": ">=20" }
 }
-

@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "typecheck": "tsc -b --pretty false"
+    "typecheck": "tsc -b --pretty false",
+    "test": "node --test tests/*.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.0",
@@ -20,4 +21,3 @@
     "@types/react-dom": "^19.0.0"
   }
 }
-
