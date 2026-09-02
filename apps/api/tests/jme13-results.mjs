@@ -4,6 +4,7 @@ import test from "node:test";
 const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 test("assistant results remain consultable under team authorization", () => {
   assert.match(source, /\/assistant-results/);
-  assert.match(source, /JOIN ai_interactions ai ON ai\.team_id = t\.id/);
+  assert.match(source, /if \(!allowed\.rowCount\) return reply\.code\(403\)/);
+  assert.match(source, /FROM ai_interactions ai/);
   assert.match(source, /team_assignments/);
 });
