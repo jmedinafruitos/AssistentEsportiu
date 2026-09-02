@@ -10,5 +10,5 @@
     "typecheck": "npm run typecheck --workspaces",
     "test:pilot": "node apps/api/tests/pilot-mvp.mjs"
   },
-  "engines": { "node": ">=20" }
+  "engines": { "node": "20.x" }
 }

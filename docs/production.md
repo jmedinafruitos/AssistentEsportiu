@@ -11,6 +11,8 @@ configuración no secreta del servicio.
 - `AI_API_KEY`: credencial del proveedor de IA, solo en el servidor.
 - `AI_BASE_URL` y `AI_MODEL`: permiten cambiar de proveedor compatible sin
   modificar la aplicación móvil.
+- `WEB_ORIGIN`: origen exacto autorizado para la PWA. Actualmente
+  `https://ssistentesportiu-app.onrender.com`.
 - `NODE_VERSION`: `20`.
 
 Los secretos se configuran en Render y nunca se guardan en Git. El proceso de
@@ -30,3 +32,6 @@ base de datos.
 
 La URL pública actual de la API es
 `https://assistentesportiu.onrender.com`.
+
+La URL pública actual de la PWA es
+`https://ssistentesportiu-app.onrender.com`.

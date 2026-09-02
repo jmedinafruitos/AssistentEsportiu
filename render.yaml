@@ -22,9 +22,9 @@ services:
       - key: AI_MODEL
         value: gpt-5-mini
       - key: WEB_ORIGIN
-        value: https://assistentesportiu-app.onrender.com
+        value: https://ssistentesportiu-app.onrender.com
   - type: web
-    name: assistentesportiu-app
+    name: ssistentesportiu-app
     runtime: static
     buildCommand: npm ci && npm run build --workspace @assistent-esportiu/web
     staticPublishPath: apps/web/dist
