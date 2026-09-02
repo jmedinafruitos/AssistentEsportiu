@@ -22,3 +22,29 @@ test("reports an unconfigured provider without making a request", async () => {
   assert.equal(service.configured, false);
   await assert.rejects(() => service.reply({ context, message: "Hola" }), /AI_NOT_CONFIGURED/);
 });
+
+test("uses a GPT-5-compatible chat completion payload", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestBody;
+  globalThis.fetch = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const service = new ConfigurableAiService({
+      apiKey: "test-key",
+      baseUrl: "https://api.openai.com/v1",
+      model: "gpt-5-mini",
+    });
+    const result = await service.reply({ context, message: "Hola" });
+    assert.equal(result.content, "OK");
+    assert.equal(requestBody.model, "gpt-5-mini");
+    assert.equal("temperature" in requestBody, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

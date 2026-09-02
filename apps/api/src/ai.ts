@@ -68,7 +68,6 @@ export class ConfigurableAiService {
       },
       body: JSON.stringify({
         model: this.configuration.model,
-        temperature: 0.3,
         messages: [
           { role: "system", content: buildSystemPrompt(input.context) },
           ...(input.history ?? []),
