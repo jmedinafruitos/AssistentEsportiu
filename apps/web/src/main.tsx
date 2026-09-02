@@ -7,7 +7,7 @@ const TOKEN_KEY = "assistent-esportiu-token";
 const suggestions = ["Prepara el pròxim entrenament", "Analitza el darrer partit", "Quins objectius prioritzem?"];
 
 function App() {
-  const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY) ?? "");
+  const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [teams, setTeams] = useState<Team[]>([]);
   const [teamId, setTeamId] = useState("");
@@ -29,12 +29,12 @@ function App() {
   }, [token]);
 
   const activeTeam = useMemo(() => teams.find((team) => team.id === teamId), [teams, teamId]);
-  function logout() { sessionStorage.removeItem(TOKEN_KEY); setToken(""); setUser(null); setTeams([]); setMessages([]); }
+  function logout() { localStorage.removeItem(TOKEN_KEY); setToken(""); setUser(null); setTeams([]); setMessages([]); }
 
   async function login(email: string, password: string) {
     setLoading(true); setError("");
     try {
-      const session = await api.login(email, password); sessionStorage.setItem(TOKEN_KEY, session.token); setToken(session.token);
+      const session = await api.login(email, password); localStorage.setItem(TOKEN_KEY, session.token); setToken(session.token);
     } catch { setError("Correu o contrasenya incorrectes."); setLoading(false); }
   }
 

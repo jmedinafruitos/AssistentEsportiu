@@ -503,7 +503,7 @@ app.post("/v1/session", async (request, reply) => {
   if (!user || !user.password_hash || !valid) {
     return reply.code(401).send({ message: "Unauthorized" });
   }
-  return { token: app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: "12h" }) };
+  return { token: app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: "72h" }) };
 });
 
 const shutdown = async () => {
