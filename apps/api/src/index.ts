@@ -1,9 +1,15 @@
 import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
+import bcrypt from "bcryptjs";
 import Fastify from "fastify";
 import { Pool } from "pg";
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
+
+// Constant-effort placeholder hash so a request for an unknown or
+// password-less email takes roughly as long as a real mismatch,
+// instead of returning early and leaking which emails are registered.
+const DUMMY_PASSWORD_HASH = bcrypt.hashSync("not-a-real-password", 10);
 
 const env = z.object({
   DATABASE_URL: z.string().url(),
@@ -482,10 +488,21 @@ app.get("/v1/teams/:teamId/assistant-results", { onRequest: [async (request) => 
 });
 
 app.post("/v1/session", async (request, reply) => {
-  const body = z.object({ email: z.string().email() }).parse(request.body);
-  const result = await db.query("SELECT id, role FROM users WHERE email = $1 AND active = true", [body.email]);
-  if (!result.rowCount) return reply.code(401).send({ message: "Unauthorized" });
-  const user = result.rows[0] as { id: string; role: string };
+  const body = z.object({
+    email: z.string().email(),
+    password: z.string().min(1),
+  }).parse(request.body);
+
+  const result = await db.query(
+    "SELECT id, role, password_hash FROM users WHERE email = $1 AND active = true",
+    [body.email],
+  );
+  const user = result.rows[0] as { id: string; role: string; password_hash: string | null } | undefined;
+
+  const valid = await bcrypt.compare(body.password, user?.password_hash ?? DUMMY_PASSWORD_HASH);
+  if (!user || !user.password_hash || !valid) {
+    return reply.code(401).send({ message: "Unauthorized" });
+  }
   return { token: app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: "12h" }) };
 });
 

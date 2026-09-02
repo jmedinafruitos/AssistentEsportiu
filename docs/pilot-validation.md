@@ -9,9 +9,12 @@ La primera execució és de només lectura:
 ```bash
 PILOT_API_URL=https://assistentesportiu.onrender.com \
 PILOT_EMAIL=correu-autoritzat \
+PILOT_PASSWORD=contrasenya-de-l-usuari \
 PILOT_TEAM=Benjamín \
 node apps/api/tests/pilot-mvp.mjs
 ```
+
+La contrasenya s'assigna amb `npm run set-password --workspace @assistent-esportiu/api -- correu-autoritzat` (JME-18); no hi ha encara un flux d'autoreinicialització.
 
 Afegir `PILOT_CONFIRM_WRITES=yes` només quan es vulgui crear el registre de
 validació identificat explícitament com a pilot.

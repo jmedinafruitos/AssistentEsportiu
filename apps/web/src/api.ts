@@ -33,7 +33,7 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
 }
 
 export const api = {
-  login: (email: string) => request<{ token: string }>("/v1/session", { method: "POST", body: JSON.stringify({ email }) }),
+  login: (email: string, password: string) => request<{ token: string }>("/v1/session", { method: "POST", body: JSON.stringify({ email, password }) }),
   me: (token: string) => request<CurrentUser>("/v1/me", {}, token),
   teams: (token: string) => request<{ teams: Team[] }>("/v1/teams", {}, token),
   chat: (token: string, teamId: string, message: string, history: ChatMessage[]) =>

@@ -10,16 +10,19 @@
     "migrate": "node dist/migrate.js",
     "test": "node --test tests/*.mjs",
     "test:preprod": "node tests/jme6-preprod.mjs",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "set-password": "node scripts/set-password.mjs"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.0",
     "@fastify/jwt": "^10.2.2",
+    "bcryptjs": "^2.4.3",
     "fastify": "^5.2.0",
     "pg": "^8.13.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
     "@types/node": "^22.10.0",
     "@types/pg": "^8.11.10",
     "tsx": "^4.19.0",
