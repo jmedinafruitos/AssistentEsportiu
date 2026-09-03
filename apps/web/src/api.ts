@@ -23,6 +23,11 @@ export type TeamEvent = {
   id: string; event_type: "training" | "match" | "meeting"; title: string;
   starts_at: string; ends_at: string | null; location: string | null; notes: string | null;
   source: "manual" | "recurring" | "fecapa"; canceled: boolean; created_at: string;
+  training_series_id?: string | null; overridden?: boolean;
+};
+export type TrainingSeries = {
+  id: string; team_id: string; title: string; weekdays: number[]; time: string;
+  duration_minutes: number | null; starts_on: string; ends_on: string; active?: boolean;
 };
 export type EventAction = { id: string; label: string; content: Record<string, unknown>; sort_order: number; completed_at: string | null };
 export type EventTypeActionTemplate = {
@@ -82,4 +87,11 @@ export const api = {
   updateEventTypeAction: (token: string, actionId: string, patch: { label?: string; content?: Record<string, unknown>; sortOrder?: number; active?: boolean }) =>
     request<EventTypeActionTemplate>(`/v1/event-type-actions/${actionId}`, { method: "PATCH", body: JSON.stringify(patch) }, token),
   syncFecapa: (token: string) => request<FecapaSyncSummary>("/v1/fecapa/sync", { method: "POST" }, token),
+  trainingSeries: (token: string, teamId: string, seriesId: string) =>
+    request<TrainingSeries>(`/v1/teams/${teamId}/training-series/${seriesId}`, {}, token),
+  updateTrainingSeries: (token: string, teamId: string, seriesId: string, patch: {
+    scope: "following" | "all"; fromEventId?: string; title?: string; weekdays?: number[];
+    time?: string; durationMinutes?: number | null; endsOn?: string;
+  }) =>
+    request<{ series: TrainingSeries; created: number; events: TeamEvent[] }>(`/v1/teams/${teamId}/training-series/${seriesId}`, { method: "PATCH", body: JSON.stringify(patch) }, token),
 };

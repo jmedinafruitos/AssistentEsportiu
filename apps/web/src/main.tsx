@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, EventAction, EventTypeActionTemplate, Team, TeamEvent, TeamPlan } from "./api";
+import { api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, EventAction, EventTypeActionTemplate, Team, TeamEvent, TeamPlan, TrainingSeries } from "./api";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -159,6 +159,7 @@ function formatEventDateRange(event: TeamEvent) {
 function EventDetail({ token, teamId, detail, onClose, onChanged }: { token: string; teamId: string; detail: { event: TeamEvent; actions: EventAction[] }; onClose: () => void; onChanged: (detail: { event: TeamEvent; actions: EventAction[] }) => void }) {
   const { event, actions } = detail;
   const [error, setError] = useState("");
+  const [editingSeries, setEditingSeries] = useState(false);
   async function toggleAction(actionId: string, completed: boolean) {
     try { const updated = await api.updateEventAction(token, teamId, event.id, actionId, { completed }); onChanged({ event, actions: actions.map((action) => action.id === actionId ? updated : action) }); }
     catch { setError("No s'ha pogut actualitzar l'acció."); }
@@ -168,7 +169,55 @@ function EventDetail({ token, teamId, detail, onClose, onChanged }: { token: str
     catch { setError("No s'ha pogut actualitzar l'esdeveniment."); }
   }
   const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
-  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true"><h2>{eventTypeLabel(event.event_type)}{showTitle && ` · ${event.title}`}</h2><p className="event-meta">{formatEventDateRange(event)}{event.location && <> · {event.location}</>}</p>{event.notes && <p>{event.notes}</p>}{actions.length > 0 && <ul className="checklist">{actions.map((action) => <li key={action.id}><label><input type="checkbox" checked={Boolean(action.completed_at)} onChange={(evt) => void toggleAction(action.id, evt.target.checked)} />{action.label}</label></li>)}</ul>}{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={() => void toggleCanceled()}>{event.canceled ? "Reactivar" : "Cancel·lar esdeveniment"}</button><button type="button" onClick={onClose}>Tancar</button></div></section></div>;
+  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true"><h2>{eventTypeLabel(event.event_type)}{showTitle && ` · ${event.title}`}</h2><p className="event-meta">{formatEventDateRange(event)}{event.location && <> · {event.location}</>}</p>{event.notes && <p>{event.notes}</p>}{actions.length > 0 && <ul className="checklist">{actions.map((action) => <li key={action.id}><label><input type="checkbox" checked={Boolean(action.completed_at)} onChange={(evt) => void toggleAction(action.id, evt.target.checked)} />{action.label}</label></li>)}</ul>}{error && <p className="error">{error}</p>}<div className="dialog-actions">{event.training_series_id && <button type="button" className="quiet" onClick={() => setEditingSeries(true)}>Editar sèrie</button>}<button type="button" className="quiet" onClick={() => void toggleCanceled()}>{event.canceled ? "Reactivar" : "Cancel·lar esdeveniment"}</button><button type="button" onClick={onClose}>Tancar</button></div></section>
+    {editingSeries && event.training_series_id && <SeriesEditor token={token} teamId={teamId} seriesId={event.training_series_id} fromEventId={event.id} onClose={() => setEditingSeries(false)} onSaved={() => { setEditingSeries(false); onClose(); }} />}
+  </div>;
+}
+
+function SeriesEditor({ token, teamId, seriesId, fromEventId, onClose, onSaved }: { token: string; teamId: string; seriesId: string; fromEventId: string; onClose: () => void; onSaved: () => void }) {
+  const [series, setSeries] = useState<TrainingSeries | null>(null);
+  const [scope, setScope] = useState<"following" | "all">("following");
+  const [title, setTitle] = useState("");
+  const [weekdays, setWeekdays] = useState<number[]>([]);
+  const [time, setTime] = useState("");
+  const [durationMinutes, setDurationMinutes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const weekdayLabels = ["Dg", "Dl", "Dt", "Dc", "Dj", "Dv", "Ds"];
+
+  useEffect(() => {
+    void api.trainingSeries(token, teamId, seriesId).then((loaded) => {
+      setSeries(loaded); setTitle(loaded.title); setWeekdays(loaded.weekdays); setTime(loaded.time);
+      setDurationMinutes(loaded.duration_minutes ? String(loaded.duration_minutes) : "");
+    }).catch(() => setError("No s'ha pogut carregar la sèrie."));
+  }, [token, teamId, seriesId]);
+
+  function toggleWeekday(day: number) { setWeekdays((current) => current.includes(day) ? current.filter((value) => value !== day) : [...current, day].sort()); }
+
+  async function submit(formEvent: FormEvent) {
+    formEvent.preventDefault(); setSaving(true); setError("");
+    try {
+      await api.updateTrainingSeries(token, teamId, seriesId, {
+        scope, fromEventId: scope === "following" ? fromEventId : undefined,
+        title, weekdays, time, durationMinutes: durationMinutes ? Number(durationMinutes) : null,
+      });
+      onSaved();
+    } catch { setError("No s'ha pogut actualitzar la sèrie."); setSaving(false); }
+  }
+
+  if (!series) return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true">{error ? <p className="error">{error}</p> : <p>Carregant…</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Tancar</button></div></section></div>;
+
+  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true"><h2>Editar sèrie d'entrenaments</h2>
+    <div className="dialog-actions mode-switch"><button type="button" className={scope === "following" ? "" : "quiet"} onClick={() => setScope("following")}>Aquest i els següents</button><button type="button" className={scope === "all" ? "" : "quiet"} onClick={() => setScope("all")}>Tots</button></div>
+    <form onSubmit={submit}>
+      <label>Títol<input required value={title} onChange={(evt) => setTitle(evt.target.value)} /></label>
+      <fieldset><legend>Dies de la setmana</legend>{weekdayLabels.map((label, day) => <label key={day} className="weekday-toggle"><input type="checkbox" checked={weekdays.includes(day)} onChange={() => toggleWeekday(day)} />{label}</label>)}</fieldset>
+      <label>Hora<input required type="time" value={time} onChange={(evt) => setTime(evt.target.value)} /></label>
+      <label>Durada en minuts (opcional)<input type="number" min="1" max="600" value={durationMinutes} onChange={(evt) => setDurationMinutes(evt.target.value)} placeholder="60" /></label>
+      {error && <p className="error">{error}</p>}
+      <div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Cancel·lar</button><button disabled={saving || !weekdays.length}>{saving ? "Desant…" : "Desar"}</button></div>
+    </form>
+  </section></div>;
 }
 
 function EventEditor({ token, teamId, onClose, onSaved }: { token: string; teamId: string; onClose: () => void; onSaved: () => void }) {

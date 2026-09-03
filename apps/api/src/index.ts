@@ -10,6 +10,7 @@ import { ConfigurableAiService } from "./ai.js";
 import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
+import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } from "./training-series.js";
 
 // Constant-effort placeholder hash so a request for an unknown or
 // password-less email takes roughly as long as a real mismatch,
@@ -406,9 +407,11 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
   const allowed = await hasTeamAccess(db, identity.sub, teamId);
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
   const result = await db.query(
-    `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at
+    `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at,
+            training_series_id, overridden
      FROM team_events
      WHERE team_id = $1
+       AND archived_at IS NULL
        AND starts_at >= COALESCE($2::timestamptz, now() - interval '1 day')
        AND ($3::timestamptz IS NULL OR starts_at < $3::timestamptz)
      ORDER BY starts_at ASC LIMIT 200`,
@@ -485,30 +488,146 @@ app.post("/v1/teams/:teamId/events/generate-trainings", { onRequest: [async (req
       return reply.code(403).send({ message: "Forbidden" });
     }
 
-    const weekdaySet = new Set(body.weekdays);
-    const [hour, minute] = body.time.split(":").map(Number);
-    const created = [];
-    for (
-      const cursor = new Date(`${body.from}T00:00:00Z`);
-      cursor <= new Date(`${body.to}T00:00:00Z`);
-      cursor.setUTCDate(cursor.getUTCDate() + 1)
-    ) {
-      if (!weekdaySet.has(cursor.getUTCDay())) continue;
-      const startsAt = new Date(cursor);
-      startsAt.setUTCHours(hour, minute, 0, 0);
-      const endsAt = body.durationMinutes ? new Date(startsAt.getTime() + body.durationMinutes * 60_000) : null;
-      const event = await client.query(
-        `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, source, created_by)
-         VALUES ($1, 'training', $2, $3, $4, 'recurring', $5)
-         RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at`,
-        [teamId, body.title, startsAt.toISOString(), endsAt ? endsAt.toISOString() : null, identity.sub],
-      );
-      const createdEvent = event.rows[0];
-      await materializeEventActions(client, createdEvent.id, teamId, categoryId, "training");
-      created.push(createdEvent);
-    }
+    const seriesResult = await client.query(
+      `INSERT INTO team_training_series (team_id, title, weekdays, time, duration_minutes, starts_on, ends_on, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, team_id, title, weekdays, time, duration_minutes, starts_on, ends_on`,
+      [teamId, body.title, body.weekdays, body.time, body.durationMinutes ?? null, body.from, body.to, identity.sub],
+    );
+    const series = seriesResult.rows[0] as TrainingSeries;
+    const created = await generateSeriesOccurrences(client, series, categoryId, new Date(`${body.from}T00:00:00Z`), identity.sub);
     await client.query("COMMIT");
-    return reply.code(201).send({ created: created.length, events: created });
+    return reply.code(201).send({ series, created: created.length, events: created });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/v1/teams/:teamId/training-series/:seriesId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, seriesId } = z.object({ teamId: z.string().uuid(), seriesId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasTeamAccess(db, identity.sub, teamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT id, team_id, title, weekdays, time, duration_minutes, starts_on, ends_on, active
+     FROM team_training_series WHERE id = $1 AND team_id = $2`,
+    [seriesId, teamId],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "Series not found" });
+  return result.rows[0];
+});
+
+// this-and-following / all edits to a recurring-training series. "Only this
+// event" doesn't come through here — it's a plain PATCH on the event itself
+// (see /v1/teams/:teamId/events/:eventId above), which sets `overridden`.
+app.patch("/v1/teams/:teamId/training-series/:seriesId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, seriesId } = z.object({ teamId: z.string().uuid(), seriesId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    scope: z.enum(["following", "all"]),
+    fromEventId: z.string().uuid().optional(),
+    title: z.string().trim().min(1).max(200).optional(),
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
+    time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Format HH:MM").optional(),
+    durationMinutes: z.number().int().min(1).max(600).nullable().optional(),
+    endsOn: z.string().date().optional(),
+  })
+    .refine((value) => value.scope !== "following" || value.fromEventId, { message: "fromEventId required for scope=following" })
+    .parse(request.body);
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const categoryId = await teamAccessCategory(client, identity.sub, teamId);
+    if (!categoryId) {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ message: "Forbidden" });
+    }
+
+    const currentResult = await client.query(
+      `SELECT id, team_id, title, weekdays, time, duration_minutes, starts_on, ends_on
+       FROM team_training_series WHERE id = $1 AND team_id = $2 AND active = true FOR UPDATE`,
+      [seriesId, teamId],
+    );
+    if (!currentResult.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(404).send({ message: "Series not found" });
+    }
+    const current = currentResult.rows[0] as TrainingSeries;
+
+    if (body.scope === "following") {
+      const fromEvent = await client.query(
+        `SELECT starts_at FROM team_events WHERE id = $1 AND team_id = $2 AND training_series_id = $3`,
+        [body.fromEventId, teamId, seriesId],
+      );
+      if (!fromEvent.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ message: "Event not found in this series" });
+      }
+      const splitDateOnly = new Date(fromEvent.rows[0].starts_at).toISOString().slice(0, 10);
+      const dayBefore = new Date(`${splitDateOnly}T00:00:00Z`);
+      dayBefore.setUTCDate(dayBefore.getUTCDate() - 1);
+
+      // Close the old series the day before the split, and archive every
+      // future occurrence of it from the split date onward — including
+      // ones that were individually overridden or canceled, since a split
+      // means "start fresh from here."
+      await client.query(`UPDATE team_training_series SET ends_on = $2, updated_at = now() WHERE id = $1`, [seriesId, dayBefore.toISOString().slice(0, 10)]);
+      await archiveFutureOccurrences(client, seriesId, new Date(`${splitDateOnly}T00:00:00Z`));
+
+      const newSeriesResult = await client.query(
+        `INSERT INTO team_training_series (team_id, title, weekdays, time, duration_minutes, starts_on, ends_on, created_by)
+         VALUES ($1, $2, $3::smallint[], $4, $5, $6, $7, $8)
+         RETURNING id, team_id, title, weekdays, time, duration_minutes, starts_on, ends_on`,
+        [
+          teamId,
+          body.title ?? current.title,
+          body.weekdays ?? current.weekdays,
+          body.time ?? current.time,
+          body.durationMinutes !== undefined ? body.durationMinutes : current.duration_minutes,
+          splitDateOnly,
+          body.endsOn ?? current.ends_on,
+        ],
+      );
+      const newSeries = newSeriesResult.rows[0] as TrainingSeries;
+      const created = await generateSeriesOccurrences(client, newSeries, categoryId, new Date(`${splitDateOnly}T00:00:00Z`), identity.sub);
+      await client.query("COMMIT");
+      return { series: newSeries, created: created.length, events: created };
+    }
+
+    // scope === "all": update the series definition in place, archive every
+    // future (not-yet-happened) occurrence, and regenerate. Past
+    // occurrences are never touched or rewritten.
+    const updated = await client.query(
+      `UPDATE team_training_series
+       SET title = COALESCE($2, title),
+           weekdays = COALESCE($3::smallint[], weekdays),
+           time = COALESCE($4, time),
+           duration_minutes = CASE WHEN $5::boolean THEN $6 ELSE duration_minutes END,
+           ends_on = COALESCE($7, ends_on),
+           updated_at = now()
+       WHERE id = $1
+       RETURNING id, team_id, title, weekdays, time, duration_minutes, starts_on, ends_on`,
+      [
+        seriesId,
+        body.title ?? null,
+        body.weekdays ?? null,
+        body.time ?? null,
+        "durationMinutes" in body, body.durationMinutes ?? null,
+        body.endsOn ?? null,
+      ],
+    );
+    const newDefinition = updated.rows[0] as TrainingSeries;
+    await archiveFutureOccurrences(client, seriesId);
+    const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+    const seriesStart = new Date(`${newDefinition.starts_on}T00:00:00Z`);
+    const regenerateFrom = seriesStart > today ? seriesStart : today;
+    const created = await generateSeriesOccurrences(client, newDefinition, categoryId, regenerateFrom, identity.sub);
+    await client.query("COMMIT");
+    return { series: newDefinition, created: created.length, events: created };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -524,7 +643,8 @@ app.get("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => re
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const event = await db.query(
-    `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at
+    `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at,
+            training_series_id, overridden
      FROM team_events WHERE id = $1 AND team_id = $2`,
     [eventId, teamId],
   );
@@ -553,6 +673,9 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
   const allowed = await hasTeamAccess(db, identity.sub, teamId);
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
+  // A direct single-event edit is always "only this event" — if it belongs
+  // to a series, mark it overridden so a later this-and-following/all edit
+  // knows to leave it alone instead of silently resetting this change.
   const result = await db.query(
     `UPDATE team_events
      SET title = COALESCE($3, title),
@@ -561,9 +684,11 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
          location = CASE WHEN $7::boolean THEN $8 ELSE location END,
          notes = CASE WHEN $9::boolean THEN $10 ELSE notes END,
          canceled = COALESCE($11, canceled),
+         overridden = CASE WHEN training_series_id IS NOT NULL THEN true ELSE overridden END,
          updated_at = now()
      WHERE id = $1 AND team_id = $2
-     RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at`,
+     RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at,
+               training_series_id, overridden`,
     [
       eventId, teamId,
       body.title ?? null,
