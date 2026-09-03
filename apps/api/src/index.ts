@@ -6,7 +6,7 @@ import { Pool } from "pg";
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
 import { materializeEventActions } from "./events.js";
-import { syncFecapaCalendars } from "./fecapa.js";
+import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 
 // Constant-effort placeholder hash so a request for an unknown or
 // password-less email takes roughly as long as a real mismatch,
@@ -895,14 +895,21 @@ app.post("/v1/fecapa/sync", { onRequest: [async (request) => request.jwtVerify()
   }
 });
 
-const FECAPA_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const runFecapaSync = () =>
-  syncFecapaCalendars(db).then(
-    (summary) => app.log.info({ summary }, "FECAPA sync completed"),
-    (error) => app.log.error({ err: error }, "FECAPA scheduled sync failed"),
-  );
-setTimeout(() => void runFecapaSync(), 30_000);
-setInterval(() => void runFecapaSync(), FECAPA_SYNC_INTERVAL_MS);
+// Runs every Monday and Thursday at 03:00 Europe/Madrid (low-traffic hour,
+// avoids hammering FECAPA's server during the day) rather than a fixed
+// interval from process boot, which would drift onto arbitrary days/times
+// across restarts.
+function scheduleFecapaSync() {
+  const next = nextFecapaSyncAt(new Date());
+  app.log.info({ next: next.toISOString() }, "Next FECAPA sync scheduled");
+  setTimeout(() => {
+    void syncFecapaCalendars(db)
+      .then((summary) => app.log.info({ summary }, "FECAPA sync completed"))
+      .catch((error) => app.log.error({ err: error }, "FECAPA scheduled sync failed"))
+      .finally(() => scheduleFecapaSync());
+  }, next.getTime() - Date.now());
+}
+scheduleFecapaSync();
 
 const shutdown = async () => {
   await db.end();

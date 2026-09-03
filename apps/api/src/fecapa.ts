@@ -2,6 +2,45 @@ import * as cheerio from "cheerio";
 import { materializeEventActions, Queryable } from "./events.js";
 
 const FECAPA_BASE = "https://www.server2.sidgad.es/fecapa";
+const SYNC_WEEKDAYS = new Set(["Mon", "Thu"]);
+const SYNC_HOUR = 3;
+const SYNC_MINUTE = 0;
+
+// Resolves the UTC instant for a Europe/Madrid wall-clock time, correcting
+// for CET/CEST via a couple of format-and-compare passes (the offset only
+// ever takes two values, so this always converges in at most 2 iterations).
+function madridInstant(year: number, month: number, day: number, hour: number, minute: number): Date {
+  const target = Date.UTC(year, month - 1, day, hour, minute, 0);
+  let guess = new Date(target);
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Madrid", hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  for (let i = 0; i < 3; i++) {
+    const parts = Object.fromEntries(dtf.formatToParts(guess).map((p) => [p.type, p.value]));
+    const seenAsUTC = Date.UTC(+parts.year, +parts.month - 1, +parts.day, +parts.hour, +parts.minute, +parts.second);
+    const diff = target - seenAsUTC;
+    if (diff === 0) break;
+    guess = new Date(guess.getTime() + diff);
+  }
+  return guess;
+}
+
+// Next Monday or Thursday 03:00 Europe/Madrid strictly after `from`.
+export function nextFecapaSyncAt(from: Date): Date {
+  const weekdayFmt = new Intl.DateTimeFormat("en-US", { timeZone: "Europe/Madrid", weekday: "short" });
+  const dateFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Madrid", year: "numeric", month: "2-digit", day: "2-digit",
+  });
+  for (let addDays = 0; addDays <= 7; addDays++) {
+    const day = new Date(from.getTime() + addDays * 86_400_000);
+    if (!SYNC_WEEKDAYS.has(weekdayFmt.format(day))) continue;
+    const parts = Object.fromEntries(dateFmt.formatToParts(day).map((p) => [p.type, p.value]));
+    const candidate = madridInstant(+parts.year, +parts.month, +parts.day, SYNC_HOUR, SYNC_MINUTE);
+    if (candidate.getTime() > from.getTime()) return candidate;
+  }
+  throw new Error("Could not compute next FECAPA sync time");
+}
 
 export type FecapaMatch = {
   homeId: number;
