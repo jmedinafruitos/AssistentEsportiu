@@ -2,7 +2,7 @@ import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import bcrypt from "bcryptjs";
 import Fastify from "fastify";
-import { Pool } from "pg";
+import { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
 
@@ -377,6 +377,403 @@ app.put("/v1/teams/:teamId/plan", { onRequest: [async (request) => request.jwtVe
     }, body.version ?? null],
   );
   if (!result.rowCount) return reply.code(body.version ? 409 : 403).send({ message: body.version ? "Plan has changed" : "Forbidden" });
+  return result.rows[0];
+});
+
+// Seeds a new event's checklist from the most specific active
+// event_type_actions template (team beats category beats club — exclusive,
+// not additive, since a single event shouldn't stack three scopes at once).
+async function materializeEventActions(
+  client: PoolClient,
+  eventId: string,
+  teamId: string,
+  categoryId: string,
+  eventType: "training" | "match" | "meeting",
+) {
+  const template = await client.query(
+    `SELECT scope, label, content, sort_order
+     FROM event_type_actions
+     WHERE active = true AND event_type = $1
+       AND (
+         (scope = 'team' AND team_id = $2)
+         OR (scope = 'category' AND category_id = $3)
+         OR (scope = 'club')
+       )
+     ORDER BY sort_order`,
+    [eventType, teamId, categoryId],
+  );
+  const rows = template.rows as Array<{ scope: string; label: string; content: unknown; sort_order: number }>;
+  const winningScope = ["team", "category", "club"].find((scope) => rows.some((row) => row.scope === scope));
+  const applicable = rows.filter((row) => row.scope === winningScope);
+
+  const inserted = [];
+  for (const action of applicable) {
+    const result = await client.query(
+      `INSERT INTO team_event_actions (team_event_id, label, content, sort_order)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, label, content, sort_order, completed_at`,
+      [eventId, action.label, action.content, action.sort_order],
+    );
+    inserted.push(result.rows[0]);
+  }
+  return inserted;
+}
+
+app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const allowed = await db.query(
+    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+    [identity.sub, teamId],
+  );
+  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT id, event_type, title, starts_at, location, notes, source, canceled, created_at
+     FROM team_events
+     WHERE team_id = $1 AND starts_at >= now() - interval '1 day'
+     ORDER BY starts_at ASC LIMIT 20`,
+    [teamId],
+  );
+  return { events: result.rows };
+});
+
+app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    eventType: z.enum(["training", "match", "meeting"]),
+    title: z.string().trim().min(1).max(200),
+    startsAt: z.string().datetime(),
+    location: z.string().trim().max(200).optional(),
+    notes: z.string().trim().max(2_000).optional(),
+  }).parse(request.body);
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const access = await client.query(
+      `SELECT t.category_id FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+       WHERE u.id = $1 AND u.active = true
+         AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+      [identity.sub, teamId],
+    );
+    if (!access.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ message: "Forbidden" });
+    }
+    const categoryId = (access.rows[0] as { category_id: string }).category_id;
+
+    const event = await client.query(
+      `INSERT INTO team_events (team_id, event_type, title, starts_at, location, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, event_type, title, starts_at, location, notes, source, canceled, created_at`,
+      [teamId, body.eventType, body.title, body.startsAt, body.location ?? null, body.notes ?? null, identity.sub],
+    );
+    const created = event.rows[0];
+    const actions = await materializeEventActions(client, created.id, teamId, categoryId, body.eventType);
+    await client.query("COMMIT");
+    return reply.code(201).send({ event: created, actions });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.post("/v1/teams/:teamId/events/generate-trainings", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    title: z.string().trim().min(1).max(200).default("Entrenament"),
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+    time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Format HH:MM"),
+    from: z.string().date(),
+    to: z.string().date(),
+  })
+    .refine((value) => new Date(`${value.to}T00:00:00Z`) >= new Date(`${value.from}T00:00:00Z`), { message: "to must be on or after from" })
+    .refine(
+      (value) => new Date(`${value.to}T00:00:00Z`).getTime() - new Date(`${value.from}T00:00:00Z`).getTime() <= 366 * 24 * 60 * 60 * 1000,
+      { message: "Range too large (max ~1 year)" },
+    )
+    .parse(request.body);
+
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    const access = await client.query(
+      `SELECT t.category_id FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+       WHERE u.id = $1 AND u.active = true
+         AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+      [identity.sub, teamId],
+    );
+    if (!access.rowCount) {
+      await client.query("ROLLBACK");
+      return reply.code(403).send({ message: "Forbidden" });
+    }
+    const categoryId = (access.rows[0] as { category_id: string }).category_id;
+
+    const weekdaySet = new Set(body.weekdays);
+    const [hour, minute] = body.time.split(":").map(Number);
+    const created = [];
+    for (
+      const cursor = new Date(`${body.from}T00:00:00Z`);
+      cursor <= new Date(`${body.to}T00:00:00Z`);
+      cursor.setUTCDate(cursor.getUTCDate() + 1)
+    ) {
+      if (!weekdaySet.has(cursor.getUTCDay())) continue;
+      const startsAt = new Date(cursor);
+      startsAt.setUTCHours(hour, minute, 0, 0);
+      const event = await client.query(
+        `INSERT INTO team_events (team_id, event_type, title, starts_at, source, created_by)
+         VALUES ($1, 'training', $2, $3, 'recurring', $4)
+         RETURNING id, event_type, title, starts_at, location, notes, source, canceled, created_at`,
+        [teamId, body.title, startsAt.toISOString(), identity.sub],
+      );
+      const createdEvent = event.rows[0];
+      await materializeEventActions(client, createdEvent.id, teamId, categoryId, "training");
+      created.push(createdEvent);
+    }
+    await client.query("COMMIT");
+    return reply.code(201).send({ created: created.length, events: created });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.get("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const allowed = await db.query(
+    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+    [identity.sub, teamId],
+  );
+  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+
+  const event = await db.query(
+    `SELECT id, event_type, title, starts_at, location, notes, source, canceled, created_at
+     FROM team_events WHERE id = $1 AND team_id = $2`,
+    [eventId, teamId],
+  );
+  if (!event.rowCount) return reply.code(404).send({ message: "Event not found" });
+
+  const actions = await db.query(
+    `SELECT id, label, content, sort_order, completed_at
+     FROM team_event_actions WHERE team_event_id = $1 ORDER BY sort_order`,
+    [eventId],
+  );
+  return { event: event.rows[0], actions: actions.rows };
+});
+
+app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    title: z.string().trim().min(1).max(200).optional(),
+    startsAt: z.string().datetime().optional(),
+    location: z.string().trim().max(200).nullable().optional(),
+    notes: z.string().trim().max(2_000).nullable().optional(),
+    canceled: z.boolean().optional(),
+  }).parse(request.body);
+
+  const allowed = await db.query(
+    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+    [identity.sub, teamId],
+  );
+  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+
+  const result = await db.query(
+    `UPDATE team_events
+     SET title = COALESCE($3, title),
+         starts_at = COALESCE($4, starts_at),
+         location = CASE WHEN $5::boolean THEN $6 ELSE location END,
+         notes = CASE WHEN $7::boolean THEN $8 ELSE notes END,
+         canceled = COALESCE($9, canceled),
+         updated_at = now()
+     WHERE id = $1 AND team_id = $2
+     RETURNING id, event_type, title, starts_at, location, notes, source, canceled, created_at`,
+    [
+      eventId, teamId,
+      body.title ?? null,
+      body.startsAt ?? null,
+      "location" in body, body.location ?? null,
+      "notes" in body, body.notes ?? null,
+      body.canceled ?? null,
+    ],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "Event not found" });
+  return result.rows[0];
+});
+
+app.post("/v1/teams/:teamId/events/:eventId/actions", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    label: z.string().trim().min(1).max(300),
+    content: z.record(z.unknown()).default({}),
+  }).parse(request.body);
+
+  const allowed = await db.query(
+    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     JOIN team_events te ON te.id = $3 AND te.team_id = t.id
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+    [identity.sub, teamId, eventId],
+  );
+  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+
+  const nextOrder = await db.query(
+    `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM team_event_actions WHERE team_event_id = $1`,
+    [eventId],
+  );
+  const result = await db.query(
+    `INSERT INTO team_event_actions (team_event_id, label, content, sort_order)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id, label, content, sort_order, completed_at`,
+    [eventId, body.label, body.content, nextOrder.rows[0].next],
+  );
+  return reply.code(201).send(result.rows[0]);
+});
+
+app.patch("/v1/teams/:teamId/events/:eventId/actions/:actionId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId, actionId } = z.object({
+    teamId: z.string().uuid(), eventId: z.string().uuid(), actionId: z.string().uuid(),
+  }).parse(request.params);
+  const body = z.object({
+    label: z.string().trim().min(1).max(300).optional(),
+    completed: z.boolean().optional(),
+  }).parse(request.body);
+
+  const allowed = await db.query(
+    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     JOIN team_events te ON te.id = $3 AND te.team_id = t.id
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+    [identity.sub, teamId, eventId],
+  );
+  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+
+  const result = await db.query(
+    `UPDATE team_event_actions
+     SET label = COALESCE($3, label),
+         completed_at = CASE
+           WHEN $4::boolean IS NULL THEN completed_at
+           WHEN $4::boolean THEN now()
+           ELSE NULL
+         END,
+         completed_by = CASE
+           WHEN $4::boolean IS NULL THEN completed_by
+           WHEN $4::boolean THEN $5
+           ELSE NULL
+         END
+     WHERE id = $1 AND team_event_id = $2
+     RETURNING id, label, content, sort_order, completed_at`,
+    [actionId, eventId, body.label ?? null, body.completed ?? null, identity.sub],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "Action not found" });
+  return result.rows[0];
+});
+
+app.delete("/v1/teams/:teamId/events/:eventId/actions/:actionId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId, actionId } = z.object({
+    teamId: z.string().uuid(), eventId: z.string().uuid(), actionId: z.string().uuid(),
+  }).parse(request.params);
+
+  const allowed = await db.query(
+    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
+     JOIN team_events te ON te.id = $3 AND te.team_id = t.id
+     WHERE u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
+    [identity.sub, teamId, eventId],
+  );
+  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+
+  const result = await db.query(
+    `DELETE FROM team_event_actions WHERE id = $1 AND team_event_id = $2`,
+    [actionId, eventId],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "Action not found" });
+  return {};
+});
+
+app.get("/v1/event-type-actions", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
+  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT eta.id, eta.scope, eta.category_id, eta.team_id, eta.event_type, eta.label, eta.content, eta.sort_order, eta.active,
+            c.name AS category, t.name AS team
+     FROM event_type_actions eta
+     LEFT JOIN categories c ON c.id = eta.category_id
+     LEFT JOIN teams t ON t.id = eta.team_id
+     ORDER BY eta.event_type, CASE eta.scope WHEN 'club' THEN 1 WHEN 'category' THEN 2 ELSE 3 END, eta.sort_order`,
+  );
+  return { actions: result.rows };
+});
+
+app.post("/v1/event-type-actions", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
+  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+
+  const body = z.object({
+    scope: z.enum(["club", "category", "team"]),
+    categoryId: z.string().uuid().optional(),
+    teamId: z.string().uuid().optional(),
+    eventType: z.enum(["training", "match", "meeting"]),
+    label: z.string().trim().min(1).max(300),
+    content: z.record(z.unknown()).default({}),
+    sortOrder: z.number().int().default(0),
+  })
+    .refine((value) => value.scope !== "category" || value.categoryId, { message: "categoryId required for scope=category" })
+    .refine((value) => value.scope !== "team" || value.teamId, { message: "teamId required for scope=team" })
+    .parse(request.body);
+
+  const result = await db.query(
+    `INSERT INTO event_type_actions (scope, category_id, team_id, event_type, label, content, sort_order, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id, scope, category_id, team_id, event_type, label, content, sort_order, active`,
+    [body.scope, body.categoryId ?? null, body.teamId ?? null, body.eventType, body.label, body.content, body.sortOrder, identity.sub],
+  );
+  return reply.code(201).send(result.rows[0]);
+});
+
+app.patch("/v1/event-type-actions/:actionId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
+  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+
+  const { actionId } = z.object({ actionId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    label: z.string().trim().min(1).max(300).optional(),
+    content: z.record(z.unknown()).optional(),
+    sortOrder: z.number().int().optional(),
+    active: z.boolean().optional(),
+  }).parse(request.body);
+
+  const result = await db.query(
+    `UPDATE event_type_actions
+     SET label = COALESCE($2, label),
+         content = COALESCE($3, content),
+         sort_order = COALESCE($4, sort_order),
+         active = COALESCE($5, active),
+         updated_at = now()
+     WHERE id = $1
+     RETURNING id, scope, category_id, team_id, event_type, label, content, sort_order, active`,
+    [actionId, body.label ?? null, body.content ?? null, body.sortOrder ?? null, body.active ?? null],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "Action template not found" });
   return result.rows[0];
 });
 
