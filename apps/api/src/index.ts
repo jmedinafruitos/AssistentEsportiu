@@ -422,6 +422,13 @@ async function materializeEventActions(
 app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  // Paginated by week: callers pass the Monday/Sunday bounds of the week
+  // they want (see weekBounds() on the frontend). Falls back to "from now"
+  // with no upper bound for any caller that doesn't pass them.
+  const query = z.object({
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+  }).parse(request.query);
   const allowed = await db.query(
     `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
      WHERE u.id = $1 AND u.active = true
@@ -430,11 +437,13 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
   );
   if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
   const result = await db.query(
-    `SELECT id, event_type, title, starts_at, location, notes, source, canceled, created_at
+    `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at
      FROM team_events
-     WHERE team_id = $1 AND starts_at >= now() - interval '1 day'
-     ORDER BY starts_at ASC LIMIT 20`,
-    [teamId],
+     WHERE team_id = $1
+       AND starts_at >= COALESCE($2::timestamptz, now() - interval '1 day')
+       AND ($3::timestamptz IS NULL OR starts_at < $3::timestamptz)
+     ORDER BY starts_at ASC LIMIT 200`,
+    [teamId, query.from ?? null, query.to ?? null],
   );
   return { events: result.rows };
 });
@@ -446,9 +455,12 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
     eventType: z.enum(["training", "match", "meeting"]),
     title: z.string().trim().min(1).max(200),
     startsAt: z.string().datetime(),
+    endsAt: z.string().datetime().optional(),
     location: z.string().trim().max(200).optional(),
     notes: z.string().trim().max(2_000).optional(),
-  }).parse(request.body);
+  })
+    .refine((value) => !value.endsAt || new Date(value.endsAt) > new Date(value.startsAt), { message: "endsAt must be after startsAt" })
+    .parse(request.body);
 
   const client = await db.connect();
   try {
@@ -466,10 +478,10 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
     const categoryId = (access.rows[0] as { category_id: string }).category_id;
 
     const event = await client.query(
-      `INSERT INTO team_events (team_id, event_type, title, starts_at, location, notes, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, event_type, title, starts_at, location, notes, source, canceled, created_at`,
-      [teamId, body.eventType, body.title, body.startsAt, body.location ?? null, body.notes ?? null, identity.sub],
+      `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, location, notes, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at`,
+      [teamId, body.eventType, body.title, body.startsAt, body.endsAt ?? null, body.location ?? null, body.notes ?? null, identity.sub],
     );
     const created = event.rows[0];
     const actions = await materializeEventActions(client, created.id, teamId, categoryId, body.eventType);
@@ -490,6 +502,7 @@ app.post("/v1/teams/:teamId/events/generate-trainings", { onRequest: [async (req
     title: z.string().trim().min(1).max(200).default("Entrenament"),
     weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
     time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Format HH:MM"),
+    durationMinutes: z.number().int().min(1).max(600).optional(),
     from: z.string().date(),
     to: z.string().date(),
   })
@@ -526,11 +539,12 @@ app.post("/v1/teams/:teamId/events/generate-trainings", { onRequest: [async (req
       if (!weekdaySet.has(cursor.getUTCDay())) continue;
       const startsAt = new Date(cursor);
       startsAt.setUTCHours(hour, minute, 0, 0);
+      const endsAt = body.durationMinutes ? new Date(startsAt.getTime() + body.durationMinutes * 60_000) : null;
       const event = await client.query(
-        `INSERT INTO team_events (team_id, event_type, title, starts_at, source, created_by)
-         VALUES ($1, 'training', $2, $3, 'recurring', $4)
-         RETURNING id, event_type, title, starts_at, location, notes, source, canceled, created_at`,
-        [teamId, body.title, startsAt.toISOString(), identity.sub],
+        `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, source, created_by)
+         VALUES ($1, 'training', $2, $3, $4, 'recurring', $5)
+         RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at`,
+        [teamId, body.title, startsAt.toISOString(), endsAt ? endsAt.toISOString() : null, identity.sub],
       );
       const createdEvent = event.rows[0];
       await materializeEventActions(client, createdEvent.id, teamId, categoryId, "training");
@@ -558,7 +572,7 @@ app.get("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => re
   if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
 
   const event = await db.query(
-    `SELECT id, event_type, title, starts_at, location, notes, source, canceled, created_at
+    `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at
      FROM team_events WHERE id = $1 AND team_id = $2`,
     [eventId, teamId],
   );
@@ -578,6 +592,7 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
   const body = z.object({
     title: z.string().trim().min(1).max(200).optional(),
     startsAt: z.string().datetime().optional(),
+    endsAt: z.string().datetime().nullable().optional(),
     location: z.string().trim().max(200).nullable().optional(),
     notes: z.string().trim().max(2_000).nullable().optional(),
     canceled: z.boolean().optional(),
@@ -595,16 +610,18 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
     `UPDATE team_events
      SET title = COALESCE($3, title),
          starts_at = COALESCE($4, starts_at),
-         location = CASE WHEN $5::boolean THEN $6 ELSE location END,
-         notes = CASE WHEN $7::boolean THEN $8 ELSE notes END,
-         canceled = COALESCE($9, canceled),
+         ends_at = CASE WHEN $5::boolean THEN $6 ELSE ends_at END,
+         location = CASE WHEN $7::boolean THEN $8 ELSE location END,
+         notes = CASE WHEN $9::boolean THEN $10 ELSE notes END,
+         canceled = COALESCE($11, canceled),
          updated_at = now()
      WHERE id = $1 AND team_id = $2
-     RETURNING id, event_type, title, starts_at, location, notes, source, canceled, created_at`,
+     RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at`,
     [
       eventId, teamId,
       body.title ?? null,
       body.startsAt ?? null,
+      "endsAt" in body, body.endsAt ?? null,
       "location" in body, body.location ?? null,
       "notes" in body, body.notes ?? null,
       body.canceled ?? null,

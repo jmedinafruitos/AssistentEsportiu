@@ -21,7 +21,7 @@ export type TeamPlan = { id: string; season: string; version: number; content: {
 export type AssistantResult = { id: string; user_message: string; assistant_message: string; created_at: string; requested_by: string };
 export type TeamEvent = {
   id: string; event_type: "training" | "match" | "meeting"; title: string;
-  starts_at: string; location: string | null; notes: string | null;
+  starts_at: string; ends_at: string | null; location: string | null; notes: string | null;
   source: "manual" | "recurring" | "fecapa"; canceled: boolean; created_at: string;
 };
 export type EventAction = { id: string; label: string; content: Record<string, unknown>; sort_order: number; completed_at: string | null };
@@ -59,14 +59,15 @@ export const api = {
   plan: (token: string, teamId: string) => request<{ plan: TeamPlan | null }>(`/v1/teams/${teamId}/plan`, {}, token),
   savePlan: (token: string, teamId: string, plan: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string; version?: number }) => request<TeamPlan>(`/v1/teams/${teamId}/plan`, { method: "PUT", body: JSON.stringify(plan) }, token),
   assistantResults: (token: string, teamId: string) => request<{ results: AssistantResult[] }>(`/v1/teams/${teamId}/assistant-results`, {}, token),
-  events: (token: string, teamId: string) => request<{ events: TeamEvent[] }>(`/v1/teams/${teamId}/events`, {}, token),
-  createEvent: (token: string, teamId: string, event: { eventType: "training" | "match" | "meeting"; title: string; startsAt: string; location?: string; notes?: string }) =>
+  events: (token: string, teamId: string, week: { from: string; to: string }) =>
+    request<{ events: TeamEvent[] }>(`/v1/teams/${teamId}/events?${new URLSearchParams(week)}`, {}, token),
+  createEvent: (token: string, teamId: string, event: { eventType: "training" | "match" | "meeting"; title: string; startsAt: string; endsAt?: string; location?: string; notes?: string }) =>
     request<{ event: TeamEvent; actions: EventAction[] }>(`/v1/teams/${teamId}/events`, { method: "POST", body: JSON.stringify(event) }, token),
-  generateTrainings: (token: string, teamId: string, plan: { title?: string; weekdays: number[]; time: string; from: string; to: string }) =>
+  generateTrainings: (token: string, teamId: string, plan: { title?: string; weekdays: number[]; time: string; durationMinutes?: number; from: string; to: string }) =>
     request<{ created: number; events: TeamEvent[] }>(`/v1/teams/${teamId}/events/generate-trainings`, { method: "POST", body: JSON.stringify(plan) }, token),
   eventDetail: (token: string, teamId: string, eventId: string) =>
     request<{ event: TeamEvent; actions: EventAction[] }>(`/v1/teams/${teamId}/events/${eventId}`, {}, token),
-  updateEvent: (token: string, teamId: string, eventId: string, patch: { title?: string; startsAt?: string; location?: string | null; notes?: string | null; canceled?: boolean }) =>
+  updateEvent: (token: string, teamId: string, eventId: string, patch: { title?: string; startsAt?: string; endsAt?: string | null; location?: string | null; notes?: string | null; canceled?: boolean }) =>
     request<TeamEvent>(`/v1/teams/${teamId}/events/${eventId}`, { method: "PATCH", body: JSON.stringify(patch) }, token),
   addEventAction: (token: string, teamId: string, eventId: string, action: { label: string; content?: Record<string, unknown> }) =>
     request<EventAction>(`/v1/teams/${teamId}/events/${eventId}/actions`, { method: "POST", body: JSON.stringify(action) }, token),

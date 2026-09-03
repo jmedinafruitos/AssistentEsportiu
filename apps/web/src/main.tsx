@@ -20,6 +20,7 @@ function App() {
   const [planning, setPlanning] = useState(false);
   const [results, setResults] = useState<AssistantResult[] | null>(null);
   const [events, setEvents] = useState<TeamEvent[]>([]);
+  const [weekOffset, setWeekOffset] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState<{ event: TeamEvent; actions: EventAction[] } | null>(null);
   const [creatingEvent, setCreatingEvent] = useState(false);
   const [managingTemplates, setManagingTemplates] = useState(false);
@@ -32,14 +33,15 @@ function App() {
     }).catch(() => logout()).finally(() => setLoading(false));
   }, [token]);
 
+  const week = useMemo(() => weekBounds(weekOffset), [weekOffset]);
   useEffect(() => {
     if (!token || !teamId) { setEvents([]); return; }
-    void api.events(token, teamId).then((result) => setEvents(result.events)).catch(() => {});
-  }, [token, teamId]);
+    void api.events(token, teamId, { from: week.from, to: week.to }).then((result) => setEvents(result.events)).catch(() => {});
+  }, [token, teamId, week.from, week.to]);
 
   async function refreshEvents() {
     if (!teamId) return;
-    const result = await api.events(token, teamId);
+    const result = await api.events(token, teamId, { from: week.from, to: week.to });
     setEvents(result.events);
   }
 
@@ -79,8 +81,17 @@ function App() {
 
   return <main className="assistant-shell">
     <header className="app-header"><div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div><button className="quiet" onClick={logout}>Sortir</button></header>
-    <section className="identity-card"><div><strong>{user.name}</strong><span>{user.sport_role ?? user.role}</span>{user.global_access && <button className="text-action" onClick={() => { if (overview) setOverview(null); else void api.coordinatorOverview(token).then(setOverview).catch(() => setError("No s'ha pogut carregar la visió global.")); }}>{overview ? "Tancar visió global" : "Visió global"}</button>}</div><label>Equip actiu<select value={teamId} onChange={(event) => { setTeamId(event.target.value); setMessages([]); }}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label></section>
-    <section className="events"><div className="events-header"><h2>Pròxims esdeveniments</h2><span><button className="text-action" onClick={() => setCreatingEvent(true)}>Afegir</button>{user.global_access && <button className="text-action" onClick={() => setManagingTemplates(true)}>Accions per tipus</button>}</span></div>{events.length ? <ul className="event-list">{events.map((event) => <li key={event.id}><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span><strong>{event.title}</strong><span>{new Date(event.starts_at).toLocaleString("ca", { dateStyle: "medium", timeStyle: "short" })}</span>{event.canceled && <em>Cancel·lat</em>}</button></li>)}</ul> : <p className="empty">Sense esdeveniments propers.</p>}</section>
+    <section className="identity-card"><div><strong>{user.name}</strong><span>{user.sport_role ?? user.role}</span>{user.global_access && <button className="text-action" onClick={() => { if (overview) setOverview(null); else void api.coordinatorOverview(token).then(setOverview).catch(() => setError("No s'ha pogut carregar la visió global.")); }}>{overview ? "Tancar visió global" : "Visió global"}</button>}</div><label>Equip actiu<select value={teamId} onChange={(event) => { setTeamId(event.target.value); setMessages([]); setWeekOffset(0); }}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label></section>
+    <section className="events">
+      <div className="events-header"><h2>Esdeveniments</h2><span><button className="text-action" onClick={() => setCreatingEvent(true)}>Afegir</button>{user.global_access && <button className="text-action" onClick={() => setManagingTemplates(true)}>Accions per tipus</button>}</span></div>
+      <div className="week-nav"><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current - 1)} aria-label="Setmana anterior">‹</button><span>{week.label}</span><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current + 1)} aria-label="Setmana següent">›</button></div>
+      {events.length
+        ? <ul className="event-list">{events.map((event) => {
+            const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
+            return <li key={event.id}><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button></li>;
+          })}</ul>
+        : <p className="empty">Sense esdeveniments aquesta setmana.</p>}
+    </section>
     {overview && <CoordinatorPanel overview={overview} />}
     <section className="conversation" aria-live="polite">
       {!messages.length && <div className="welcome"><span className="eyebrow">{activeTeam?.category ?? "El teu equip"}</span><h2>Què vols treballar avui?</h2><p>Conversarem amb l'estratègia del club i el context autoritzat de {activeTeam?.name}.</p></div>}
@@ -104,6 +115,36 @@ function speak(content: string) { if (!("speechSynthesis" in window)) return; wi
 
 function eventTypeLabel(type: "training" | "match" | "meeting") { return type === "training" ? "Entrenament" : type === "match" ? "Partit" : "Reunió"; }
 
+// Monday-Sunday week bounds for the calendar's pagination, offset in whole weeks from the current one.
+function weekBounds(offset: number) {
+  const now = new Date();
+  const isoDay = (now.getDay() + 6) % 7; // 0 = Monday ... 6 = Sunday
+  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - isoDay + offset * 7);
+  monday.setHours(0, 0, 0, 0);
+  const nextMonday = new Date(monday);
+  nextMonday.setDate(monday.getDate() + 7);
+  const sunday = new Date(nextMonday);
+  sunday.setDate(sunday.getDate() - 1);
+  const label = `${monday.toLocaleDateString("ca", { day: "numeric", month: "short" })} – ${sunday.toLocaleDateString("ca", { day: "numeric", month: "short" })}`;
+  return { from: monday.toISOString(), to: nextMonday.toISOString(), label };
+}
+
+function formatEventTime(event: TeamEvent) {
+  const start = new Date(event.starts_at);
+  const datePart = start.toLocaleDateString("ca", { weekday: "short", day: "numeric", month: "short" });
+  const startTime = start.toLocaleTimeString("ca", { hour: "2-digit", minute: "2-digit" });
+  if (!event.ends_at) return `${datePart} · ${startTime}`;
+  const endTime = new Date(event.ends_at).toLocaleTimeString("ca", { hour: "2-digit", minute: "2-digit" });
+  return `${datePart} · ${startTime}–${endTime}`;
+}
+
+function formatEventDateRange(event: TeamEvent) {
+  const startLabel = new Date(event.starts_at).toLocaleString("ca", { dateStyle: "full", timeStyle: "short" });
+  if (!event.ends_at) return startLabel;
+  const endTime = new Date(event.ends_at).toLocaleTimeString("ca", { hour: "2-digit", minute: "2-digit" });
+  return `${startLabel}–${endTime}`;
+}
+
 function EventDetail({ token, teamId, detail, onClose, onChanged }: { token: string; teamId: string; detail: { event: TeamEvent; actions: EventAction[] }; onClose: () => void; onChanged: (detail: { event: TeamEvent; actions: EventAction[] }) => void }) {
   const { event, actions } = detail;
   const [error, setError] = useState("");
@@ -115,7 +156,8 @@ function EventDetail({ token, teamId, detail, onClose, onChanged }: { token: str
     try { onChanged({ event: await api.updateEvent(token, teamId, event.id, { canceled: !event.canceled }), actions }); }
     catch { setError("No s'ha pogut actualitzar l'esdeveniment."); }
   }
-  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true"><h2>{eventTypeLabel(event.event_type)} · {event.title}</h2><p className="event-meta">{new Date(event.starts_at).toLocaleString("ca", { dateStyle: "full", timeStyle: "short" })}{event.location && <> · {event.location}</>}</p>{event.notes && <p>{event.notes}</p>}{actions.length > 0 && <ul className="checklist">{actions.map((action) => <li key={action.id}><label><input type="checkbox" checked={Boolean(action.completed_at)} onChange={(evt) => void toggleAction(action.id, evt.target.checked)} />{action.label}</label></li>)}</ul>}{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={() => void toggleCanceled()}>{event.canceled ? "Reactivar" : "Cancel·lar esdeveniment"}</button><button type="button" onClick={onClose}>Tancar</button></div></section></div>;
+  const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
+  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true"><h2>{eventTypeLabel(event.event_type)}{showTitle && ` · ${event.title}`}</h2><p className="event-meta">{formatEventDateRange(event)}{event.location && <> · {event.location}</>}</p>{event.notes && <p>{event.notes}</p>}{actions.length > 0 && <ul className="checklist">{actions.map((action) => <li key={action.id}><label><input type="checkbox" checked={Boolean(action.completed_at)} onChange={(evt) => void toggleAction(action.id, evt.target.checked)} />{action.label}</label></li>)}</ul>}{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={() => void toggleCanceled()}>{event.canceled ? "Reactivar" : "Cancel·lar esdeveniment"}</button><button type="button" onClick={onClose}>Tancar</button></div></section></div>;
 }
 
 function EventEditor({ token, teamId, onClose, onSaved }: { token: string; teamId: string; onClose: () => void; onSaved: () => void }) {
@@ -124,10 +166,12 @@ function EventEditor({ token, teamId, onClose, onSaved }: { token: string; teamI
   const [title, setTitle] = useState("");
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
+  const [endTime, setEndTime] = useState("");
   const [location, setLocation] = useState("");
   const [notes, setNotes] = useState("");
   const [weekdays, setWeekdays] = useState<number[]>([]);
   const [recurTime, setRecurTime] = useState("");
+  const [durationMinutes, setDurationMinutes] = useState("");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [saving, setSaving] = useState(false);
@@ -136,18 +180,30 @@ function EventEditor({ token, teamId, onClose, onSaved }: { token: string; teamI
   function toggleWeekday(day: number) { setWeekdays((current) => current.includes(day) ? current.filter((value) => value !== day) : [...current, day].sort()); }
   async function submitSingle(formEvent: FormEvent) {
     formEvent.preventDefault(); setSaving(true); setError("");
-    try { await api.createEvent(token, teamId, { eventType, title, startsAt: new Date(`${date}T${time}`).toISOString(), location: location || undefined, notes: notes || undefined }); onSaved(); }
-    catch { setError("No s'ha pogut desar l'esdeveniment."); setSaving(false); }
+    try {
+      await api.createEvent(token, teamId, {
+        eventType, title, startsAt: new Date(`${date}T${time}`).toISOString(),
+        endsAt: endTime ? new Date(`${date}T${endTime}`).toISOString() : undefined,
+        location: location || undefined, notes: notes || undefined,
+      });
+      onSaved();
+    } catch { setError("No s'ha pogut desar l'esdeveniment."); setSaving(false); }
   }
   async function submitRecurring(formEvent: FormEvent) {
     formEvent.preventDefault(); setSaving(true); setError("");
-    try { await api.generateTrainings(token, teamId, { title: title || undefined, weekdays, time: recurTime, from, to }); onSaved(); }
-    catch { setError("No s'han pogut generar els entrenaments."); setSaving(false); }
+    try {
+      await api.generateTrainings(token, teamId, {
+        title: title || undefined, weekdays, time: recurTime,
+        durationMinutes: durationMinutes ? Number(durationMinutes) : undefined,
+        from, to,
+      });
+      onSaved();
+    } catch { setError("No s'han pogut generar els entrenaments."); setSaving(false); }
   }
   return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true"><h2>Nou esdeveniment</h2><div className="dialog-actions mode-switch"><button type="button" className={mode === "single" ? "" : "quiet"} onClick={() => setMode("single")}>Puntual</button><button type="button" className={mode === "recurring" ? "" : "quiet"} onClick={() => setMode("recurring")}>Entrenaments recurrents</button></div>
     {mode === "single"
-      ? <form onSubmit={submitSingle}><label>Tipus<select value={eventType} onChange={(evt) => setEventType(evt.target.value as typeof eventType)}><option value="training">Entrenament</option><option value="match">Partit</option><option value="meeting">Reunió</option></select></label><label>Títol<input required value={title} onChange={(evt) => setTitle(evt.target.value)} placeholder="Ex: Partit vs. CE Vic" /></label><label>Data<input required type="date" value={date} onChange={(evt) => setDate(evt.target.value)} /></label><label>Hora<input required type="time" value={time} onChange={(evt) => setTime(evt.target.value)} /></label><label>Lloc<input value={location} onChange={(evt) => setLocation(evt.target.value)} placeholder="Opcional" /></label><label>Notes<textarea value={notes} onChange={(evt) => setNotes(evt.target.value)} /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Cancel·lar</button><button disabled={saving}>{saving ? "Desant…" : "Desar"}</button></div></form>
-      : <form onSubmit={submitRecurring}><label>Títol (opcional)<input value={title} onChange={(evt) => setTitle(evt.target.value)} placeholder="Entrenament" /></label><fieldset><legend>Dies de la setmana</legend>{weekdayLabels.map((label, day) => <label key={day} className="weekday-toggle"><input type="checkbox" checked={weekdays.includes(day)} onChange={() => toggleWeekday(day)} />{label}</label>)}</fieldset><label>Hora<input required type="time" value={recurTime} onChange={(evt) => setRecurTime(evt.target.value)} /></label><label>Des de<input required type="date" value={from} onChange={(evt) => setFrom(evt.target.value)} /></label><label>Fins a<input required type="date" value={to} onChange={(evt) => setTo(evt.target.value)} /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Cancel·lar</button><button disabled={saving || !weekdays.length}>{saving ? "Generant…" : "Generar"}</button></div></form>}
+      ? <form onSubmit={submitSingle}><label>Tipus<select value={eventType} onChange={(evt) => setEventType(evt.target.value as typeof eventType)}><option value="training">Entrenament</option><option value="match">Partit</option><option value="meeting">Reunió</option></select></label><label>Títol<input required value={title} onChange={(evt) => setTitle(evt.target.value)} placeholder="Ex: Partit vs. CE Vic" /></label><label>Data<input required type="date" value={date} onChange={(evt) => setDate(evt.target.value)} /></label><label>Hora d'inici<input required type="time" value={time} onChange={(evt) => setTime(evt.target.value)} /></label><label>Hora de fi (opcional)<input type="time" value={endTime} onChange={(evt) => setEndTime(evt.target.value)} /></label><label>Lloc<input value={location} onChange={(evt) => setLocation(evt.target.value)} placeholder="Opcional" /></label><label>Notes<textarea value={notes} onChange={(evt) => setNotes(evt.target.value)} /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Cancel·lar</button><button disabled={saving}>{saving ? "Desant…" : "Desar"}</button></div></form>
+      : <form onSubmit={submitRecurring}><label>Títol (opcional)<input value={title} onChange={(evt) => setTitle(evt.target.value)} placeholder="Entrenament" /></label><fieldset><legend>Dies de la setmana</legend>{weekdayLabels.map((label, day) => <label key={day} className="weekday-toggle"><input type="checkbox" checked={weekdays.includes(day)} onChange={() => toggleWeekday(day)} />{label}</label>)}</fieldset><label>Hora<input required type="time" value={recurTime} onChange={(evt) => setRecurTime(evt.target.value)} /></label><label>Durada en minuts (opcional)<input type="number" min="1" max="600" value={durationMinutes} onChange={(evt) => setDurationMinutes(evt.target.value)} placeholder="60" /></label><label>Des de<input required type="date" value={from} onChange={(evt) => setFrom(evt.target.value)} /></label><label>Fins a<input required type="date" value={to} onChange={(evt) => setTo(evt.target.value)} /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Cancel·lar</button><button disabled={saving || !weekdays.length}>{saving ? "Generant…" : "Generar"}</button></div></form>}
   </section></div>;
 }
 
