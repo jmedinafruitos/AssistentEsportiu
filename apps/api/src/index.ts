@@ -2,9 +2,11 @@ import cors from "@fastify/cors";
 import jwt from "@fastify/jwt";
 import bcrypt from "bcryptjs";
 import Fastify from "fastify";
-import { Pool, PoolClient } from "pg";
+import { Pool } from "pg";
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
+import { materializeEventActions } from "./events.js";
+import { syncFecapaCalendars } from "./fecapa.js";
 
 // Constant-effort placeholder hash so a request for an unknown or
 // password-less email takes roughly as long as a real mismatch,
@@ -379,45 +381,6 @@ app.put("/v1/teams/:teamId/plan", { onRequest: [async (request) => request.jwtVe
   if (!result.rowCount) return reply.code(body.version ? 409 : 403).send({ message: body.version ? "Plan has changed" : "Forbidden" });
   return result.rows[0];
 });
-
-// Seeds a new event's checklist from the most specific active
-// event_type_actions template (team beats category beats club — exclusive,
-// not additive, since a single event shouldn't stack three scopes at once).
-async function materializeEventActions(
-  client: PoolClient,
-  eventId: string,
-  teamId: string,
-  categoryId: string,
-  eventType: "training" | "match" | "meeting",
-) {
-  const template = await client.query(
-    `SELECT scope, label, content, sort_order
-     FROM event_type_actions
-     WHERE active = true AND event_type = $1
-       AND (
-         (scope = 'team' AND team_id = $2)
-         OR (scope = 'category' AND category_id = $3)
-         OR (scope = 'club')
-       )
-     ORDER BY sort_order`,
-    [eventType, teamId, categoryId],
-  );
-  const rows = template.rows as Array<{ scope: string; label: string; content: unknown; sort_order: number }>;
-  const winningScope = ["team", "category", "club"].find((scope) => rows.some((row) => row.scope === scope));
-  const applicable = rows.filter((row) => row.scope === winningScope);
-
-  const inserted = [];
-  for (const action of applicable) {
-    const result = await client.query(
-      `INSERT INTO team_event_actions (team_event_id, label, content, sort_order)
-       VALUES ($1, $2, $3, $4)
-       RETURNING id, label, content, sort_order, completed_at`,
-      [eventId, action.label, action.content, action.sort_order],
-    );
-    inserted.push(result.rows[0]);
-  }
-  return inserted;
-}
 
 app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
@@ -919,6 +882,27 @@ app.post("/v1/session", async (request, reply) => {
   }
   return { token: app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: "72h" }) };
 });
+
+app.post("/v1/fecapa/sync", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
+  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  try {
+    return await syncFecapaCalendars(db);
+  } catch (error) {
+    request.log.error({ err: error }, "FECAPA manual sync failed");
+    return reply.code(502).send({ message: "FECAPA sync failed" });
+  }
+});
+
+const FECAPA_SYNC_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const runFecapaSync = () =>
+  syncFecapaCalendars(db).then(
+    (summary) => app.log.info({ summary }, "FECAPA sync completed"),
+    (error) => app.log.error({ err: error }, "FECAPA scheduled sync failed"),
+  );
+setTimeout(() => void runFecapaSync(), 30_000);
+setInterval(() => void runFecapaSync(), FECAPA_SYNC_INTERVAL_MS);
 
 const shutdown = async () => {
   await db.end();

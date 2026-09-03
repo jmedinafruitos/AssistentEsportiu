@@ -24,6 +24,7 @@ function App() {
   const [selectedEvent, setSelectedEvent] = useState<{ event: TeamEvent; actions: EventAction[] } | null>(null);
   const [creatingEvent, setCreatingEvent] = useState(false);
   const [managingTemplates, setManagingTemplates] = useState(false);
+  const [syncingFecapa, setSyncingFecapa] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -48,6 +49,16 @@ function App() {
   async function openEvent(eventId: string) {
     try { setSelectedEvent(await api.eventDetail(token, teamId, eventId)); }
     catch { setError("No s'ha pogut carregar l'esdeveniment."); }
+  }
+
+  async function syncFecapa() {
+    setSyncingFecapa(true); setError("");
+    try {
+      const summary = await api.syncFecapa(token);
+      setNotice(`FECAPA sincronitzat: ${summary.eventsCreated} partits nous, ${summary.eventsUpdated} actualitzats (${summary.leagues} lligues).`);
+      void refreshEvents();
+    } catch { setError("No s'ha pogut sincronitzar amb FECAPA."); }
+    finally { setSyncingFecapa(false); }
   }
 
   const activeTeam = useMemo(() => teams.find((team) => team.id === teamId), [teams, teamId]);
@@ -83,7 +94,7 @@ function App() {
     <header className="app-header"><div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div><button className="quiet" onClick={logout}>Sortir</button></header>
     <section className="identity-card"><div><strong>{user.name}</strong><span>{user.sport_role ?? user.role}</span>{user.global_access && <button className="text-action" onClick={() => { if (overview) setOverview(null); else void api.coordinatorOverview(token).then(setOverview).catch(() => setError("No s'ha pogut carregar la visió global.")); }}>{overview ? "Tancar visió global" : "Visió global"}</button>}</div><label>Equip actiu<select value={teamId} onChange={(event) => { setTeamId(event.target.value); setMessages([]); setWeekOffset(0); }}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label></section>
     <section className="events">
-      <div className="events-header"><h2>Esdeveniments</h2><span><button className="text-action" onClick={() => setCreatingEvent(true)}>Afegir</button>{user.global_access && <button className="text-action" onClick={() => setManagingTemplates(true)}>Accions per tipus</button>}</span></div>
+      <div className="events-header"><h2>Esdeveniments</h2><span><button className="text-action" onClick={() => setCreatingEvent(true)}>Afegir</button>{user.global_access && <button className="text-action" onClick={() => setManagingTemplates(true)}>Accions per tipus</button>}{user.global_access && <button className="text-action" disabled={syncingFecapa} onClick={() => void syncFecapa()}>{syncingFecapa ? "Sincronitzant…" : "Sincronitzar FECAPA"}</button>}</span></div>
       <div className="week-nav"><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current - 1)} aria-label="Setmana anterior">‹</button><span>{week.label}</span><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current + 1)} aria-label="Setmana següent">›</button></div>
       {events.length
         ? <ul className="event-list">{events.map((event) => {

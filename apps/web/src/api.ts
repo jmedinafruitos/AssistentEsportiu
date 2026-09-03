@@ -30,6 +30,7 @@ export type EventTypeActionTemplate = {
   event_type: "training" | "match" | "meeting"; label: string; content: Record<string, unknown>;
   sort_order: number; active: boolean; category?: string | null; team?: string | null;
 };
+export type FecapaSyncSummary = { leagues: number; matchesSeen: number; eventsCreated: number; eventsUpdated: number };
 
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
@@ -80,4 +81,5 @@ export const api = {
     request<EventTypeActionTemplate>("/v1/event-type-actions", { method: "POST", body: JSON.stringify(template) }, token),
   updateEventTypeAction: (token: string, actionId: string, patch: { label?: string; content?: Record<string, unknown>; sortOrder?: number; active?: boolean }) =>
     request<EventTypeActionTemplate>(`/v1/event-type-actions/${actionId}`, { method: "PATCH", body: JSON.stringify(patch) }, token),
+  syncFecapa: (token: string) => request<FecapaSyncSummary>("/v1/fecapa/sync", { method: "POST" }, token),
 };
