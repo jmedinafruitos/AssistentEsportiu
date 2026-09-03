@@ -60,21 +60,46 @@ export class ConfigurableAiService {
   }): Promise<{ content: string; model: string }> {
     if (!this.configuration.apiKey) throw new Error("AI_NOT_CONFIGURED");
 
+    const body = JSON.stringify({
+      model: this.configuration.model,
+      messages: [
+        { role: "system", content: buildSystemPrompt(input.context) },
+        ...(input.history ?? []),
+        { role: "user", content: input.message },
+      ],
+    });
+
+    // One retry after a transient failure (timeout, network error, or a
+    // 429/5xx from the provider) so a single slow or flaky response doesn't
+    // fail the whole chat turn outright. A non-transient error (4xx other
+    // than 429) fails immediately — retrying it would just repeat the same
+    // rejection.
+    try {
+      return await this.attempt(body, 20_000);
+    } catch (error) {
+      if (!this.isTransient(error)) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return await this.attempt(body, 15_000);
+    }
+  }
+
+  private isTransient(error: unknown): boolean {
+    if (error instanceof Error && error.name === "TimeoutError") return true;
+    if (error instanceof Error && /^AI_PROVIDER_ERROR_(429|5\d\d)$/.test(error.message)) return true;
+    // A network-level failure (DNS, connection reset, etc.) surfaces as a
+    // plain TypeError from fetch — also worth one retry.
+    return error instanceof TypeError;
+  }
+
+  private async attempt(body: string, timeoutMs: number): Promise<{ content: string; model: string }> {
     const response = await fetch(`${this.configuration.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.configuration.apiKey}`,
         "content-type": "application/json",
       },
-      body: JSON.stringify({
-        model: this.configuration.model,
-        messages: [
-          { role: "system", content: buildSystemPrompt(input.context) },
-          ...(input.history ?? []),
-          { role: "user", content: input.message },
-        ],
-      }),
-      signal: AbortSignal.timeout(30_000),
+      body,
+      signal: AbortSignal.timeout(timeoutMs),
     });
 
     if (!response.ok) throw new Error(`AI_PROVIDER_ERROR_${response.status}`);

@@ -13,6 +13,7 @@ COPY package.json ./
 COPY apps/api/package.json apps/api/package.json
 RUN npm install --omit=dev --workspace @assistent-esportiu/api
 COPY --from=build /app/apps/api/dist apps/api/dist
+COPY apps/api/migrations apps/api/migrations
 WORKDIR /app/apps/api
 EXPOSE 3000
 CMD ["node", "dist/index.js"]

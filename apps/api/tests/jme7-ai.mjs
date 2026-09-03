@@ -48,3 +48,39 @@ test("uses a GPT-5-compatible chat completion payload", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("retries once after a transient 5xx and succeeds", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) return new Response("", { status: 503 });
+    return new Response(JSON.stringify({ choices: [{ message: { content: "Recovered" } }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+
+  try {
+    const service = new ConfigurableAiService({ apiKey: "test-key", baseUrl: "https://api.openai.com/v1", model: "gpt-5-mini" });
+    const result = await service.reply({ context, message: "Hola" });
+    assert.equal(result.content, "Recovered");
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("does not retry a non-transient 4xx", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls += 1; return new Response("", { status: 400 }); };
+
+  try {
+    const service = new ConfigurableAiService({ apiKey: "test-key", baseUrl: "https://api.openai.com/v1", model: "gpt-5-mini" });
+    await assert.rejects(() => service.reply({ context, message: "Hola" }), /AI_PROVIDER_ERROR_400/);
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
