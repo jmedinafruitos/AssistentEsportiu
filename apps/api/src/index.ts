@@ -4,7 +4,7 @@ import jwt from "@fastify/jwt";
 import rateLimit from "@fastify/rate-limit";
 import bcrypt from "bcryptjs";
 import Fastify from "fastify";
-import { Pool } from "pg";
+import { Pool, types } from "pg";
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
 import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
@@ -16,6 +16,12 @@ import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } f
 // password-less email takes roughly as long as a real mismatch,
 // instead of returning early and leaking which emails are registered.
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync("not-a-real-password", 10);
+
+// pg defaults DATE columns (team_training_series.starts_on/ends_on,
+// holidays.date) to JS Date objects. The rest of the app treats dates as
+// plain 'YYYY-MM-DD' strings (request bodies, external_ref keys, etc.) —
+// keep DATE columns consistent with that instead of silently mixing types.
+types.setTypeParser(1082, (value) => value);
 
 const env = z.object({
   DATABASE_URL: z.string().url(),

@@ -50,6 +50,18 @@ test("generates one occurrence per matching weekday, skipping holidays", async (
   assert.equal(created[0].ends_at.slice(11, 16), "19:00");
 });
 
+test("handles ends_on coming back as a JS Date instead of a string", async () => {
+  // Regression test: pg returns DATE columns as Date objects unless the
+  // type parser is overridden. `${aDateObject}` in a template literal
+  // silently produces a non-ISO string (e.g. "Wed Sep 30 2026 ..."),
+  // which crashed generateSeriesOccurrences with "Invalid time value".
+  const seriesWithDateObject = { ...series, ends_on: new Date("2026-09-30T00:00:00Z") };
+  const { db, inserted } = makeMockDb({ holidays: [] });
+  const created = await generateSeriesOccurrences(db, seriesWithDateObject, "category-1", new Date("2026-09-01T00:00:00Z"), "user-1");
+  assert.equal(inserted.length, 5);
+  assert.equal(created.at(-1).starts_at.slice(0, 10), "2026-09-29");
+});
+
 test("generating from a later fromDate only produces occurrences from that date on", async () => {
   const { db, inserted } = makeMockDb({ holidays: [] });
   const created = await generateSeriesOccurrences(db, series, "category-1", new Date("2026-09-16T00:00:00Z"), "user-1");

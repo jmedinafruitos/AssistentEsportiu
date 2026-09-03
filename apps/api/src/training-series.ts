@@ -12,6 +12,14 @@ export type TrainingSeries = {
   ends_on: string;
 };
 
+// starts_on/ends_on are DATE columns. index.ts configures pg to return
+// those as plain 'YYYY-MM-DD' strings (matching TrainingSeries' type), but
+// this stays defensive in case that isn't true for some caller — a raw
+// Date here would silently stringify wrong inside a template literal.
+function dateOnly(value: string | Date): string {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : value;
+}
+
 async function holidaySet(db: Queryable, from: Date, to: Date): Promise<Set<string>> {
   const result = await db.query(
     `SELECT to_char(date, 'YYYY-MM-DD') AS date FROM holidays WHERE date >= $1 AND date <= $2`,
@@ -32,7 +40,7 @@ export async function generateSeriesOccurrences(
   fromDate: Date,
   createdBy: string | null,
 ) {
-  const seriesEnd = new Date(`${series.ends_on}T00:00:00Z`);
+  const seriesEnd = new Date(`${dateOnly(series.ends_on)}T00:00:00Z`);
   const holidays = await holidaySet(db, fromDate, seriesEnd);
   const weekdaySet = new Set(series.weekdays);
   const [hour, minute] = series.time.split(":").map(Number);
