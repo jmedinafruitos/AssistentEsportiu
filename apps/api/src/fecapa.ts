@@ -1,5 +1,6 @@
 import * as cheerio from "cheerio";
-import { materializeEventActions, Queryable } from "./events.js";
+import { Queryable } from "./db.js";
+import { materializeEventActions } from "./events.js";
 
 const FECAPA_BASE = "https://www.server2.sidgad.es/fecapa";
 const SYNC_WEEKDAYS = new Set(["Mon", "Thu"]);

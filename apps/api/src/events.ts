@@ -1,6 +1,4 @@
-import { Pool } from "pg";
-
-export type Queryable = { query: Pool["query"] };
+import { Queryable } from "./db.js";
 
 // Seeds a new event's checklist from the most specific active
 // event_type_actions template (team beats category beats club — exclusive,

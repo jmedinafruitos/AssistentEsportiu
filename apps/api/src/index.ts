@@ -1,10 +1,13 @@
 import cors from "@fastify/cors";
+import helmet from "@fastify/helmet";
 import jwt from "@fastify/jwt";
+import rateLimit from "@fastify/rate-limit";
 import bcrypt from "bcryptjs";
 import Fastify from "fastify";
 import { Pool } from "pg";
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
+import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 
@@ -24,7 +27,11 @@ const env = z.object({
 }).parse(process.env);
 
 const app = Fastify({ logger: true });
-const db = new Pool({ connectionString: env.DATABASE_URL });
+// Explicit rather than relying on pg's own default — a single web service
+// instance at this club's scale (a few dozen concurrent users at most), well
+// within any Render Postgres plan's connection limit. Revisit once JME-8's
+// pilot shows real concurrency.
+const db = new Pool({ connectionString: env.DATABASE_URL, max: 10 });
 const ai = new ConfigurableAiService({
   apiKey: env.AI_API_KEY,
   baseUrl: env.AI_BASE_URL,
@@ -33,6 +40,13 @@ const ai = new ConfigurableAiService({
 
 await app.register(cors, { origin: env.WEB_ORIGIN ?? false });
 await app.register(jwt, { secret: env.JWT_SECRET });
+await app.register(helmet);
+// Global baseline for every route; /v1/session and /v1/chat get tighter
+// per-route limits below (brute-force and AI-cost concerns respectively).
+// Keyed by IP rather than authenticated user — simpler and avoids relying
+// on onRequest hook ordering between this plugin and our own jwtVerify
+// hook, and is plenty at this club's scale (one coach per connection).
+await app.register(rateLimit, { max: 200, timeWindow: "1 minute" });
 
 app.get("/health", async () => {
   await db.query("SELECT 1");
@@ -213,24 +227,26 @@ app.patch("/v1/strategy-contexts/:contextId", { onRequest: [async (request) => r
 
 app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
-  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
-  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
-  const teams = await db.query(
-    `SELECT t.id, t.name, t.season, c.name AS category,
-            count(DISTINCT ta.user_id)::int AS staff_count,
-            count(DISTINCT tr.id)::int AS record_count,
-            max(tr.happened_at) AS last_activity_at
-     FROM teams t JOIN categories c ON c.id = t.category_id
-     LEFT JOIN team_assignments ta ON ta.team_id = t.id
-     LEFT JOIN team_records tr ON tr.team_id = t.id
-     WHERE t.active = true
-     GROUP BY t.id, c.name ORDER BY t.name`,
-  );
-  const pending = await db.query(
-    `SELECT p.id, p.strategy_context_id, p.base_version, p.reason, p.proposed_at, u.name AS proposed_by_name
-     FROM strategy_change_proposals p JOIN users u ON u.id = p.proposed_by
-     WHERE p.status = 'pending' ORDER BY p.proposed_at DESC`,
-  );
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  const [teams, pending] = await Promise.all([
+    db.query(
+      `SELECT t.id, t.name, t.season, c.name AS category,
+              count(DISTINCT ta.user_id)::int AS staff_count,
+              count(DISTINCT tr.id)::int AS record_count,
+              max(tr.happened_at) AS last_activity_at
+       FROM teams t JOIN categories c ON c.id = t.category_id
+       LEFT JOIN team_assignments ta ON ta.team_id = t.id
+       LEFT JOIN team_records tr ON tr.team_id = t.id
+       WHERE t.active = true
+       GROUP BY t.id, c.name ORDER BY t.name`,
+    ),
+    db.query(
+      `SELECT p.id, p.strategy_context_id, p.base_version, p.reason, p.proposed_at, u.name AS proposed_by_name
+       FROM strategy_change_proposals p JOIN users u ON u.id = p.proposed_by
+       WHERE p.status = 'pending' ORDER BY p.proposed_at DESC`,
+    ),
+  ]);
   return { teams: teams.rows, pendingProposals: pending.rows };
 });
 
@@ -296,13 +312,8 @@ app.post("/v1/strategy-change-proposals/:proposalId/confirm", { onRequest: [asyn
 app.get("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
-  const allowed = await db.query(
-    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-     WHERE u.id = $1 AND u.active = true
-       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-    [identity.sub, teamId],
-  );
-  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const allowed = await hasTeamAccess(db, identity.sub, teamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
   const result = await db.query(
     `SELECT tr.id, tr.record_type, tr.happened_at, tr.content, tr.created_at,
             u.name AS created_by_name
@@ -392,13 +403,8 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
   }).parse(request.query);
-  const allowed = await db.query(
-    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-     WHERE u.id = $1 AND u.active = true
-       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-    [identity.sub, teamId],
-  );
-  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const allowed = await hasTeamAccess(db, identity.sub, teamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
   const result = await db.query(
     `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at
      FROM team_events
@@ -428,17 +434,11 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
   const client = await db.connect();
   try {
     await client.query("BEGIN");
-    const access = await client.query(
-      `SELECT t.category_id FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-       WHERE u.id = $1 AND u.active = true
-         AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-      [identity.sub, teamId],
-    );
-    if (!access.rowCount) {
+    const categoryId = await teamAccessCategory(client, identity.sub, teamId);
+    if (!categoryId) {
       await client.query("ROLLBACK");
       return reply.code(403).send({ message: "Forbidden" });
     }
-    const categoryId = (access.rows[0] as { category_id: string }).category_id;
 
     const event = await client.query(
       `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, location, notes, created_by)
@@ -479,17 +479,11 @@ app.post("/v1/teams/:teamId/events/generate-trainings", { onRequest: [async (req
   const client = await db.connect();
   try {
     await client.query("BEGIN");
-    const access = await client.query(
-      `SELECT t.category_id FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-       WHERE u.id = $1 AND u.active = true
-         AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-      [identity.sub, teamId],
-    );
-    if (!access.rowCount) {
+    const categoryId = await teamAccessCategory(client, identity.sub, teamId);
+    if (!categoryId) {
       await client.query("ROLLBACK");
       return reply.code(403).send({ message: "Forbidden" });
     }
-    const categoryId = (access.rows[0] as { category_id: string }).category_id;
 
     const weekdaySet = new Set(body.weekdays);
     const [hour, minute] = body.time.split(":").map(Number);
@@ -526,13 +520,8 @@ app.post("/v1/teams/:teamId/events/generate-trainings", { onRequest: [async (req
 app.get("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
-  const allowed = await db.query(
-    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-     WHERE u.id = $1 AND u.active = true
-       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-    [identity.sub, teamId],
-  );
-  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const allowed = await hasTeamAccess(db, identity.sub, teamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const event = await db.query(
     `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at
@@ -561,13 +550,8 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
     canceled: z.boolean().optional(),
   }).parse(request.body);
 
-  const allowed = await db.query(
-    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-     WHERE u.id = $1 AND u.active = true
-       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-    [identity.sub, teamId],
-  );
-  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const allowed = await hasTeamAccess(db, identity.sub, teamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const result = await db.query(
     `UPDATE team_events
@@ -602,14 +586,8 @@ app.post("/v1/teams/:teamId/events/:eventId/actions", { onRequest: [async (reque
     content: z.record(z.unknown()).default({}),
   }).parse(request.body);
 
-  const allowed = await db.query(
-    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-     JOIN team_events te ON te.id = $3 AND te.team_id = t.id
-     WHERE u.id = $1 AND u.active = true
-       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-    [identity.sub, teamId, eventId],
-  );
-  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const nextOrder = await db.query(
     `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM team_event_actions WHERE team_event_id = $1`,
@@ -634,14 +612,8 @@ app.patch("/v1/teams/:teamId/events/:eventId/actions/:actionId", { onRequest: [a
     completed: z.boolean().optional(),
   }).parse(request.body);
 
-  const allowed = await db.query(
-    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-     JOIN team_events te ON te.id = $3 AND te.team_id = t.id
-     WHERE u.id = $1 AND u.active = true
-       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-    [identity.sub, teamId, eventId],
-  );
-  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const result = await db.query(
     `UPDATE team_event_actions
@@ -670,14 +642,8 @@ app.delete("/v1/teams/:teamId/events/:eventId/actions/:actionId", { onRequest: [
     teamId: z.string().uuid(), eventId: z.string().uuid(), actionId: z.string().uuid(),
   }).parse(request.params);
 
-  const allowed = await db.query(
-    `SELECT 1 FROM users u JOIN teams t ON t.id = $2 AND t.active = true
-     JOIN team_events te ON te.id = $3 AND te.team_id = t.id
-     WHERE u.id = $1 AND u.active = true
-       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))`,
-    [identity.sub, teamId, eventId],
-  );
-  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const result = await db.query(
     `DELETE FROM team_event_actions WHERE id = $1 AND team_event_id = $2`,
@@ -689,8 +655,8 @@ app.delete("/v1/teams/:teamId/events/:eventId/actions/:actionId", { onRequest: [
 
 app.get("/v1/event-type-actions", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
-  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
-  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
   const result = await db.query(
     `SELECT eta.id, eta.scope, eta.category_id, eta.team_id, eta.event_type, eta.label, eta.content, eta.sort_order, eta.active,
             c.name AS category, t.name AS team
@@ -704,8 +670,8 @@ app.get("/v1/event-type-actions", { onRequest: [async (request) => request.jwtVe
 
 app.post("/v1/event-type-actions", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
-  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
-  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
 
   const body = z.object({
     scope: z.enum(["club", "category", "team"]),
@@ -731,8 +697,8 @@ app.post("/v1/event-type-actions", { onRequest: [async (request) => request.jwtV
 
 app.patch("/v1/event-type-actions/:actionId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
-  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
-  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
 
   const { actionId } = z.object({ actionId: z.string().uuid() }).parse(request.params);
   const body = z.object({
@@ -757,7 +723,10 @@ app.patch("/v1/event-type-actions/:actionId", { onRequest: [async (request) => r
   return result.rows[0];
 });
 
-app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+app.post("/v1/chat", {
+  onRequest: [async (request) => request.jwtVerify()],
+  config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
+}, async (request, reply) => {
   const identity = request.user as { sub: string };
   const body = z.object({
     teamId: z.string().uuid(),
@@ -790,24 +759,26 @@ app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, as
     name: string; role: string; sport_role: string | null; id: string;
     team_name: string; season: string; category_id: string; category: string;
   };
-  const contexts = await db.query(
-    `SELECT scope, content, version
-     FROM strategy_contexts
-     WHERE active = true AND (scope = 'club' OR category_id = $1 OR team_id = $2)
-     ORDER BY CASE scope WHEN 'club' THEN 1 WHEN 'category' THEN 2 ELSE 3 END`,
-    [actor.category_id, actor.id],
-  );
-  const recentRecords = await db.query(
-    `SELECT record_type, happened_at, content
-     FROM team_records WHERE team_id = $1
-     ORDER BY happened_at DESC, created_at DESC LIMIT 10`,
-    [actor.id],
-  );
-  const activePlan = await db.query(
-    `SELECT season, content, version, updated_at FROM team_plans
-     WHERE team_id = $1 AND season = $2 LIMIT 1`,
-    [actor.id, actor.season],
-  );
+  const [contexts, recentRecords, activePlan] = await Promise.all([
+    db.query(
+      `SELECT scope, content, version
+       FROM strategy_contexts
+       WHERE active = true AND (scope = 'club' OR category_id = $1 OR team_id = $2)
+       ORDER BY CASE scope WHEN 'club' THEN 1 WHEN 'category' THEN 2 ELSE 3 END`,
+      [actor.category_id, actor.id],
+    ),
+    db.query(
+      `SELECT record_type, happened_at, content
+       FROM team_records WHERE team_id = $1
+       ORDER BY happened_at DESC, created_at DESC LIMIT 10`,
+      [actor.id],
+    ),
+    db.query(
+      `SELECT season, content, version, updated_at FROM team_plans
+       WHERE team_id = $1 AND season = $2 LIMIT 1`,
+      [actor.id, actor.season],
+    ),
+  ]);
 
   try {
     const result = await ai.reply({
@@ -843,15 +814,8 @@ app.post("/v1/chat", { onRequest: [async (request) => request.jwtVerify()] }, as
 app.get("/v1/teams/:teamId/assistant-results", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
-  const allowed = await db.query(
-    `SELECT 1 FROM users viewer JOIN teams t ON t.id = $2 AND t.active = true
-     WHERE viewer.id = $1 AND viewer.active = true
-       AND (viewer.global_access OR EXISTS (
-         SELECT 1 FROM team_assignments ta WHERE ta.user_id = viewer.id AND ta.team_id = t.id
-       ))`,
-    [identity.sub, teamId],
-  );
-  if (!allowed.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const allowed = await hasTeamAccess(db, identity.sub, teamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const result = await db.query(
     `SELECT ai.id, ai.user_message, ai.assistant_message, ai.created_at, u.name AS requested_by
@@ -864,7 +828,9 @@ app.get("/v1/teams/:teamId/assistant-results", { onRequest: [async (request) => 
   return { results: result.rows };
 });
 
-app.post("/v1/session", async (request, reply) => {
+app.post("/v1/session", {
+  config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
+}, async (request, reply) => {
   const body = z.object({
     email: z.string().email(),
     password: z.string().min(1),
@@ -885,8 +851,8 @@ app.post("/v1/session", async (request, reply) => {
 
 app.post("/v1/fecapa/sync", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
-  const actor = await db.query("SELECT 1 FROM users WHERE id = $1 AND active = true AND global_access = true", [identity.sub]);
-  if (!actor.rowCount) return reply.code(403).send({ message: "Forbidden" });
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
   try {
     return await syncFecapaCalendars(db);
   } catch (error) {
