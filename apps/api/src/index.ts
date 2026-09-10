@@ -10,6 +10,7 @@ import { ConfigurableAiService } from "./ai.js";
 import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
 import { driveConfigured, syncDriveDocuments } from "./drive.js";
 import { extractPendingDocuments } from "./extraction.js";
+import { suggestExercisesFromSummary } from "./exercise-suggestions.js";
 import { generateStrategyProposals } from "./strategy-proposals.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
@@ -873,6 +874,92 @@ app.patch("/v1/event-type-actions/:actionId", { onRequest: [async (request) => r
   );
   if (!result.rowCount) return reply.code(404).send({ message: "Action template not found" });
   return result.rows[0];
+});
+
+app.get("/v1/exercises", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
+  const query = z.object({
+    tag: z.string().trim().min(1).optional(),
+    type: z.enum(["juego", "circuito", "ejercicio", "tactica"]).optional(),
+  }).parse(request.query);
+  const result = await db.query(
+    `SELECT id, name, type, description, variants, tags, source_document_id, page_ref, created_at
+     FROM exercises
+     WHERE ($1::text IS NULL OR tags @> ARRAY[$1::text])
+       AND ($2::text IS NULL OR type = $2)
+     ORDER BY name`,
+    [query.tag ?? null, query.type ?? null],
+  );
+  return { exercises: result.rows };
+});
+
+app.post("/v1/exercises", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  const body = z.object({
+    name: z.string().trim().min(1).max(200),
+    type: z.enum(["juego", "circuito", "ejercicio", "tactica"]),
+    description: z.string().trim().max(4_000).optional(),
+    variants: z.array(z.string().trim().min(1).max(300)).max(20).default([]),
+    tags: z.array(z.string().trim().min(1).max(60)).max(20).default([]),
+    sourceDocumentId: z.string().uuid().optional(),
+    pageRef: z.string().trim().max(50).optional(),
+  }).parse(request.body);
+  const result = await db.query(
+    `INSERT INTO exercises (name, type, description, variants, tags, source_document_id, page_ref, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id, name, type, description, variants, tags, source_document_id, page_ref, created_at`,
+    [body.name, body.type, body.description ?? null, body.variants, body.tags, body.sourceDocumentId ?? null, body.pageRef ?? null, identity.sub],
+  );
+  return reply.code(201).send(result.rows[0]);
+});
+
+app.patch("/v1/exercises/:exerciseId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  const { exerciseId } = z.object({ exerciseId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    name: z.string().trim().min(1).max(200).optional(),
+    type: z.enum(["juego", "circuito", "ejercicio", "tactica"]).optional(),
+    description: z.string().trim().max(4_000).nullable().optional(),
+    variants: z.array(z.string().trim().min(1).max(300)).max(20).optional(),
+    tags: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
+  }).parse(request.body);
+  const result = await db.query(
+    `UPDATE exercises
+     SET name = COALESCE($2, name),
+         type = COALESCE($3, type),
+         description = CASE WHEN $4::boolean THEN $5 ELSE description END,
+         variants = COALESCE($6::text[], variants),
+         tags = COALESCE($7::text[], tags)
+     WHERE id = $1
+     RETURNING id, name, type, description, variants, tags, source_document_id, page_ref, created_at`,
+    [exerciseId, body.name ?? null, body.type ?? null, "description" in body, body.description ?? null, body.variants ?? null, body.tags ?? null],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "Exercise not found" });
+  return result.rows[0];
+});
+
+app.post("/v1/exercises/suggest", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  if (!ai.configured) return reply.code(503).send({ message: "AI service is not configured" });
+  const body = z.object({ sourceDocumentId: z.string().uuid() }).parse(request.body);
+  const document = await db.query(
+    `SELECT title, summary FROM source_documents WHERE id = $1 AND summary IS NOT NULL`,
+    [body.sourceDocumentId],
+  );
+  if (!document.rowCount) return reply.code(404).send({ message: "Document not found or not yet summarized" });
+  const { title, summary } = document.rows[0] as { title: string; summary: string };
+  try {
+    const exercises = await suggestExercisesFromSummary(ai, title, summary);
+    return { exercises };
+  } catch (error) {
+    request.log.error({ err: error }, "Exercise suggestion failed");
+    return reply.code(502).send({ message: "Exercise suggestion failed" });
+  }
 });
 
 app.post("/v1/chat", {
