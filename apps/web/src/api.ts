@@ -15,7 +15,12 @@ export type TeamRecord = {
 };
 export type CoordinatorOverview = {
   teams: Array<Team & { staff_count: number; record_count: number; last_activity_at: string | null }>;
-  pendingProposals: Array<{ id: string; reason: string; proposed_at: string; proposed_by_name: string }>;
+  pendingProposals: Array<{
+    id: string; reason: string; proposed_at: string; proposed_by_name: string;
+    source_document_id: string | null; source_document_title: string | null;
+    source_document_layer: "principios" | "estructura" | "recursos" | null;
+    source_document_drive_url: string | null; source_document_summary: string | null;
+  }>;
 };
 export type TeamPlan = { id: string; season: string; version: number; content: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string } };
 export type AssistantResult = { id: string; user_message: string; assistant_message: string; created_at: string; requested_by: string };
