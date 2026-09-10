@@ -11,6 +11,7 @@ import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } fro
 import { driveConfigured, syncDriveDocuments } from "./drive.js";
 import { extractPendingDocuments } from "./extraction.js";
 import { suggestExercisesFromSummary } from "./exercise-suggestions.js";
+import { syncEventToCalendar } from "./google-calendar.js";
 import { generateStrategyProposals } from "./strategy-proposals.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
@@ -38,6 +39,7 @@ const env = z.object({
   GOOGLE_SERVICE_ACCOUNT_EMAIL: z.string().email().optional(),
   GOOGLE_SERVICE_ACCOUNT_KEY: z.string().min(1).optional(),
   DRIVE_FOLDER_ID: z.string().min(1).optional(),
+  GOOGLE_CALENDAR_ID: z.string().min(1).optional(),
 }).parse(process.env);
 
 const app = Fastify({ logger: true });
@@ -55,6 +57,13 @@ const driveConfig = {
   serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
   serviceAccountKey: env.GOOGLE_SERVICE_ACCOUNT_KEY,
   folderId: env.DRIVE_FOLDER_ID,
+};
+// Same service account as Drive, also shared to the club's Calendar — one
+// credential for the whole app rather than managing two.
+const calendarConfig = {
+  serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  serviceAccountKey: env.GOOGLE_SERVICE_ACCOUNT_KEY,
+  calendarId: env.GOOGLE_CALENDAR_ID,
 };
 
 await app.register(cors, { origin: env.WEB_ORIGIN ?? false });
@@ -521,6 +530,13 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
     const created = event.rows[0];
     const actions = await materializeEventActions(client, created.id, teamId, categoryId, body.eventType);
     await client.query("COMMIT");
+    // Fired after commit, not awaited: Calendar's latency shouldn't hold up
+    // the response, and a failure here must not undo an event Postgres
+    // already has (Postgres is the source of truth — JME-30).
+    void syncEventToCalendar(db, calendarConfig, {
+      id: created.id, title: created.title, startsAt: created.starts_at, endsAt: created.ends_at,
+      location: created.location, notes: created.notes, canceled: created.canceled, googleCalendarEventId: null,
+    }).catch((error) => request.log.error({ err: error, eventId: created.id }, "Calendar sync failed"));
     return reply.code(201).send({ event: created, actions });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -757,7 +773,7 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
          updated_at = now()
      WHERE id = $1 AND team_id = $2
      RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at,
-               training_series_id, overridden`,
+               training_series_id, overridden, google_calendar_event_id`,
     [
       eventId, teamId,
       body.title ?? null,
@@ -769,7 +785,14 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
     ],
   );
   if (!result.rowCount) return reply.code(404).send({ message: "Event not found" });
-  return result.rows[0];
+  const updated = result.rows[0];
+  // Same fire-and-forget, best-effort stance as on creation (JME-30).
+  void syncEventToCalendar(db, calendarConfig, {
+    id: updated.id, title: updated.title, startsAt: updated.starts_at, endsAt: updated.ends_at,
+    location: updated.location, notes: updated.notes, canceled: updated.canceled,
+    googleCalendarEventId: updated.google_calendar_event_id,
+  }).catch((error) => request.log.error({ err: error, eventId: updated.id }, "Calendar sync failed"));
+  return updated;
 });
 
 app.post("/v1/teams/:teamId/events/:eventId/actions", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {

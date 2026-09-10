@@ -1,5 +1,5 @@
-import { createSign } from "node:crypto";
 import { Queryable } from "./db.js";
+import { getGoogleAccessToken } from "./google-auth.js";
 
 export type DriveConfiguration = {
   serviceAccountEmail?: string;
@@ -10,7 +10,6 @@ export type DriveConfiguration = {
 type ResolvedDriveConfiguration = Required<DriveConfiguration>;
 
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly";
-const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_FILES_API = "https://www.googleapis.com/drive/v3/files";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
@@ -37,42 +36,10 @@ export function decideSyncStatus(previousHash: string | undefined, currentHash: 
   return previousHash === currentHash ? undefined : "en_revision";
 }
 
-function base64url(input: Buffer | string): string {
-  return Buffer.from(input).toString("base64url");
-}
-
-// Hand-rolled service-account JWT-bearer flow (RFC 7523) for a single
-// read-only scope — simpler than pulling in the full googleapis SDK for
-// what is otherwise one token exchange before a handful of REST calls.
+// JWT-bearer token exchange itself now lives in google-auth.ts, shared with
+// the Calendar sync (JME-30).
 export async function getAccessToken(config: ResolvedDriveConfiguration): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
-  const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
-  const claims = base64url(JSON.stringify({
-    iss: config.serviceAccountEmail,
-    scope: DRIVE_SCOPE,
-    aud: TOKEN_URL,
-    iat: now,
-    exp: now + 3600,
-  }));
-  const signingInput = `${header}.${claims}`;
-  // Render (and most env-var stores) can't hold real newlines, so the key is
-  // stored with literal "\n" escapes and unescaped here.
-  const privateKey = config.serviceAccountKey.replace(/\\n/g, "\n");
-  const signature = createSign("RSA-SHA256").update(signingInput).sign(privateKey);
-  const assertion = `${signingInput}.${base64url(signature)}`;
-
-  const response = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
-    }),
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!response.ok) throw new Error(`DRIVE_AUTH_ERROR_${response.status}`);
-  const body = (await response.json()) as { access_token: string };
-  return body.access_token;
+  return getGoogleAccessToken(config.serviceAccountEmail, config.serviceAccountKey, DRIVE_SCOPE);
 }
 
 type DriveFile = {
