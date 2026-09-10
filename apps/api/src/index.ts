@@ -9,6 +9,7 @@ import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
 import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
 import { driveConfigured, syncDriveDocuments } from "./drive.js";
+import { extractPendingDocuments } from "./extraction.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } from "./training-series.js";
@@ -1024,6 +1025,21 @@ app.post("/v1/drive/sync", { onRequest: [async (request) => request.jwtVerify()]
   }
 });
 
+app.post("/v1/drive/extract", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  if (!driveConfigured(driveConfig) || !ai.configured) {
+    return reply.code(503).send({ message: "Drive extraction is not configured" });
+  }
+  try {
+    return await extractPendingDocuments(db, driveConfig, ai);
+  } catch (error) {
+    request.log.error({ err: error }, "Drive manual extraction failed");
+    return reply.code(502).send({ message: "Drive extraction failed" });
+  }
+});
+
 // Coordinator keeps editing EstrategiaHCS in Drive as normal; this just
 // polls for changes on a fixed cadence rather than a specific day/time —
 // unlike FECAPA there's no external server to be a considerate guest of, and
@@ -1037,7 +1053,16 @@ function scheduleDriveSync() {
   setTimeout(() => {
     void syncDriveDocuments(db, driveConfig)
       .then((summary) => app.log.info({ summary }, "Drive sync completed"))
-      .catch((error) => app.log.error({ err: error }, "Drive scheduled sync failed"))
+      // Extraction runs right after sync so newly detected documents get a
+      // summary in the same pass — skipped (not an error) when AI isn't
+      // configured, matching the rest of the app's "AI is optional" stance.
+      .then(() => {
+        if (!ai.configured) return;
+        return extractPendingDocuments(db, driveConfig, ai).then((summary) =>
+          app.log.info({ summary }, "Drive extraction completed"),
+        );
+      })
+      .catch((error) => app.log.error({ err: error }, "Drive scheduled sync/extraction failed"))
       .finally(() => scheduleDriveSync());
   }, DRIVE_SYNC_INTERVAL_MS);
 }

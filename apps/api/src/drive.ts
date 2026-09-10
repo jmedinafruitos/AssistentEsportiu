@@ -44,7 +44,7 @@ function base64url(input: Buffer | string): string {
 // Hand-rolled service-account JWT-bearer flow (RFC 7523) for a single
 // read-only scope — simpler than pulling in the full googleapis SDK for
 // what is otherwise one token exchange before a handful of REST calls.
-async function getAccessToken(config: ResolvedDriveConfiguration): Promise<string> {
+export async function getAccessToken(config: ResolvedDriveConfiguration): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
   const header = base64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
   const claims = base64url(JSON.stringify({
@@ -105,6 +105,15 @@ async function listChildren(accessToken: string, folderId: string): Promise<Driv
   return files;
 }
 
+export async function downloadDriveFile(accessToken: string, fileId: string): Promise<Buffer> {
+  const response = await fetch(`${DRIVE_FILES_API}/${fileId}?alt=media`, {
+    headers: { authorization: `Bearer ${accessToken}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) throw new Error(`DRIVE_DOWNLOAD_ERROR_${response.status}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
 export type DriveSyncSummary = {
   layersScanned: number;
   filesSeen: number;
@@ -148,7 +157,10 @@ export async function syncDriveDocuments(db: Queryable, config: DriveConfigurati
                drive_url = EXCLUDED.drive_url,
                content_hash = EXCLUDED.content_hash,
                status = COALESCE($7, source_documents.status),
-               ingested_at = CASE WHEN $7 IS NOT NULL THEN now() ELSE source_documents.ingested_at END`,
+               ingested_at = CASE WHEN $7 IS NOT NULL THEN now() ELSE source_documents.ingested_at END,
+               -- A changed hash means the old summary (JME-36) describes
+               -- stale content; clear it so the extraction pass regenerates it.
+               summary = CASE WHEN $7 IS NOT NULL THEN NULL ELSE source_documents.summary END`,
         [file.id, file.name, layer, contentHash, file.mimeType, driveUrl, status ?? null],
       );
 
