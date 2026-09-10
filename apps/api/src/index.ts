@@ -353,16 +353,59 @@ app.get("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jw
   return { records: result.rows };
 });
 
-app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
-  const identity = request.user as { sub: string };
-  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
-  const body = z.object({
-    type: z.enum(["training", "match"]),
+// Training's content contract is documented in docs/ficha-entreno-schema.md
+// (JME-42) — a fixed structure matching the paper "Ficha entreno" template,
+// as opposed to match's freeform summary/outcome/nextObjectives (JME-10,
+// unchanged). "Activación" fields are per-phase descriptions in the paper
+// template, not booleans, so each is optional free text.
+const trainingBlockSchema = z.object({
+  description: z.string().trim().min(1).max(1_000),
+  diagramAssetUrl: z.string().trim().url().optional(),
+  exerciseId: z.string().uuid().optional(),
+});
+const recordBodySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("match"),
     happenedAt: z.string().datetime(),
     summary: z.string().trim().min(1).max(2_000),
     outcome: z.string().trim().max(500).optional(),
     nextObjectives: z.array(z.string().trim().min(1).max(300)).max(10).default([]),
-  }).parse(request.body);
+  }),
+  z.object({
+    type: z.literal("training"),
+    happenedAt: z.string().datetime(),
+    sessionNumber: z.number().int().positive().optional(),
+    coach: z.string().trim().min(1).max(200).optional(),
+    notes: z.string().trim().max(2_000).optional(),
+    activation: z.object({
+      prevencion: z.string().trim().max(500).optional(),
+      activacionPorteros: z.string().trim().max(500).optional(),
+      activacionJugadores: z.string().trim().max(500).optional(),
+      integrado: z.string().trim().max(500).optional(),
+      participativo: z.string().trim().max(500).optional(),
+    }).default({}),
+    blocks: z.array(trainingBlockSchema).min(1).max(3),
+  }),
+]);
+
+app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const body = recordBodySchema.parse(request.body);
+  const content = body.type === "match"
+    ? { summary: body.summary, outcome: body.outcome ?? null, nextObjectives: body.nextObjectives }
+    : {
+        sessionNumber: body.sessionNumber ?? null,
+        coach: body.coach ?? null,
+        notes: body.notes ?? null,
+        activation: body.activation,
+        blocks: body.blocks.map((block, orderIndex) => ({
+          orderIndex,
+          description: block.description,
+          diagramAssetUrl: block.diagramAssetUrl ?? null,
+          exerciseId: block.exerciseId ?? null,
+        })),
+      };
   const result = await db.query(
     `INSERT INTO team_records (team_id, record_type, happened_at, content, created_by)
      SELECT t.id, $3, $4, $5, u.id
@@ -370,9 +413,7 @@ app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.j
      WHERE u.id = $1 AND u.active = true
        AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))
      RETURNING id, record_type, happened_at, content, created_at`,
-    [identity.sub, teamId, body.type, body.happenedAt, {
-      summary: body.summary, outcome: body.outcome ?? null, nextObjectives: body.nextObjectives,
-    }],
+    [identity.sub, teamId, body.type, body.happenedAt, content],
   );
   if (!result.rowCount) return reply.code(403).send({ message: "Forbidden" });
   return reply.code(201).send(result.rows[0]);

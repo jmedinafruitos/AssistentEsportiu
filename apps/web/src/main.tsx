@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, EventAction, EventTypeActionTemplate, Team, TeamEvent, TeamPlan, TrainingSeries } from "./api";
+import { api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, EventAction, EventTypeActionTemplate, Exercise, RecordInput, Team, TeamEvent, TeamPlan, TrainingSeries } from "./api";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -111,7 +111,7 @@ function App() {
     </section>
     {!messages.length && <nav className="suggestions" aria-label="Suggeriments">{suggestions.map((item) => <button key={item} onClick={() => send(item)}>{item}</button>)}<button onClick={() => setRecording(true)}>Registrar activitat</button><button onClick={() => setPlanning(true)}>Planificació</button><button onClick={() => { if (results) setResults(null); else void api.assistantResults(token, teamId).then(({ results: history }) => setResults(history)); }}>Resultats desats</button></nav>}
     {results && <section className="result-list"><h2>Resultats de l'assistent</h2>{results.length ? results.map((result) => <article key={result.id}><small>{new Date(result.created_at).toLocaleDateString("ca")} · {result.requested_by}</small><strong>{result.user_message}</strong><p>{result.assistant_message}</p><button className="speak" onClick={() => speak(result.assistant_message)}>Escoltar</button></article>) : <p>Encara no hi ha resultats desats.</p>}</section>}
-    {recording && <RecordCapture teamName={activeTeam?.name ?? "l'equip"} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, teamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
+    {recording && <RecordCapture teamName={activeTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, teamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
     {planning && <PlanningEditor token={token} teamId={teamId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
     {selectedEvent && <EventDetail token={token} teamId={teamId} detail={selectedEvent} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />}
     {creatingEvent && <EventEditor token={token} teamId={teamId} onClose={() => setCreatingEvent(false)} onSaved={() => { setCreatingEvent(false); void refreshEvents(); }} />}
@@ -305,19 +305,64 @@ function CoordinatorPanel({ overview }: { overview: CoordinatorOverview }) {
   return <section className="overview"><div><span className="eyebrow">Coordinació</span><h2>Activitat de tots els equips</h2></div><div className="team-grid">{overview.teams.map((team) => <article key={team.id}><strong>{team.name}</strong><span>{team.category}</span><p>{team.record_count} registres · {team.staff_count} tècnics</p><small>{team.last_activity_at ? `Darrera activitat: ${new Date(team.last_activity_at).toLocaleDateString("ca")}` : "Encara sense activitat"}</small></article>)}</div>{overview.pendingProposals.length > 0 && <div className="proposal-list"><p className="pending">{overview.pendingProposals.length} canvis pendents de confirmació explícita.</p>{overview.pendingProposals.map((proposal) => <article key={proposal.id} className="proposal-card"><p>{proposal.reason}</p><small>{proposal.proposed_by_name} · {new Date(proposal.proposed_at).toLocaleDateString("ca")}</small>{proposal.source_document_id && <div className="source-document">{proposal.source_document_layer && <span className={`layer-badge layer-${proposal.source_document_layer}`}>{proposal.source_document_layer}</span>}{proposal.source_document_drive_url ? <a href={proposal.source_document_drive_url} target="_blank" rel="noreferrer">{proposal.source_document_title}</a> : <strong>{proposal.source_document_title}</strong>}{proposal.source_document_summary && <p className="source-summary">{proposal.source_document_summary}</p>}</div>}</article>)}</div>}</section>;
 }
 
-function RecordCapture({ teamName, onCancel, onSave }: { teamName: string; onCancel: () => void; onSave: (record: { type: "training" | "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }) => Promise<void> }) {
+type FichaBlockDraft = { description: string; diagramAssetUrl: string; exerciseId: string };
+const EMPTY_FICHA_BLOCK: FichaBlockDraft = { description: "", diagramAssetUrl: "", exerciseId: "" };
+
+function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamName: string; coachName: string; token: string; onCancel: () => void; onSave: (record: RecordInput) => Promise<void> }) {
   const [type, setType] = useState<"training" | "match">("training");
   const [summary, setSummary] = useState("");
   const [outcome, setOutcome] = useState("");
   const [objectives, setObjectives] = useState("");
+  const [sessionNumber, setSessionNumber] = useState("");
+  const [coach, setCoach] = useState(coachName);
+  const [notes, setNotes] = useState("");
+  const [activation, setActivation] = useState({ prevencion: "", activacionPorteros: "", activacionJugadores: "", integrado: "", participativo: "" });
+  const [blocks, setBlocks] = useState<FichaBlockDraft[]>([{ ...EMPTY_FICHA_BLOCK }]);
+  const [exercises, setExercises] = useState<Exercise[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  useEffect(() => { if (type === "training") void api.exercises(token).then((result) => setExercises(result.exercises)).catch(() => {}); }, [type, token]);
+  function updateBlock(index: number, patch: Partial<FichaBlockDraft>) {
+    setBlocks((current) => current.map((block, i) => (i === index ? { ...block, ...patch } : block)));
+  }
   async function submit(event: FormEvent) {
     event.preventDefault(); setSaving(true); setError("");
-    try { await onSave({ type, happenedAt: new Date().toISOString(), summary, outcome: outcome || undefined, nextObjectives: objectives.split("\n").map((item) => item.trim()).filter(Boolean) }); }
-    catch { setError("No s'ha pogut desar l'activitat."); setSaving(false); }
+    try {
+      if (type === "match") {
+        await onSave({ type, happenedAt: new Date().toISOString(), summary, outcome: outcome || undefined, nextObjectives: objectives.split("\n").map((item) => item.trim()).filter(Boolean) });
+      } else {
+        await onSave({
+          type, happenedAt: new Date().toISOString(),
+          sessionNumber: sessionNumber ? Number(sessionNumber) : undefined,
+          coach: coach || undefined, notes: notes || undefined,
+          activation,
+          blocks: blocks.filter((block) => block.description.trim()).map((block) => ({
+            description: block.description, diagramAssetUrl: block.diagramAssetUrl || undefined, exerciseId: block.exerciseId || undefined,
+          })),
+        });
+      }
+    } catch { setError("No s'ha pogut desar l'activitat."); setSaving(false); }
   }
-  return <div className="modal-backdrop" role="presentation"><section className="record-card" role="dialog" aria-modal="true" aria-labelledby="record-title"><h2 id="record-title">Registrar {teamName}</h2><form onSubmit={submit}><label>Tipus<select value={type} onChange={(event) => setType(event.target.value as "training" | "match")}><option value="training">Entrenament</option><option value="match">Partit</option></select></label><label>Resum<textarea required value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="Què heu treballat i com ha anat?" /></label><label>Resultat o valoració<input value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder="Opcional" /></label><label>Pròxims objectius<textarea value={objectives} onChange={(event) => setObjectives(event.target.value)} placeholder="Un objectiu per línia" /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onCancel}>Cancel·lar</button><button disabled={saving}>{saving ? "Desant…" : "Desar"}</button></div></form></section></div>;
+  return <div className="modal-backdrop" role="presentation"><section className="record-card" role="dialog" aria-modal="true" aria-labelledby="record-title"><h2 id="record-title">Registrar {teamName}</h2><form onSubmit={submit}>
+    <label>Tipus<select value={type} onChange={(event) => setType(event.target.value as "training" | "match")}><option value="training">Entrenament</option><option value="match">Partit</option></select></label>
+    {type === "match"
+      ? <><label>Resum<textarea required value={summary} onChange={(event) => setSummary(event.target.value)} placeholder="Què heu treballat i com ha anat?" /></label><label>Resultat o valoració<input value={outcome} onChange={(event) => setOutcome(event.target.value)} placeholder="Opcional" /></label><label>Pròxims objectius<textarea value={objectives} onChange={(event) => setObjectives(event.target.value)} placeholder="Un objectiu per línia" /></label></>
+      : <>
+        <div className="ficha-header"><label>Sessió núm.<input type="number" min="1" value={sessionNumber} onChange={(event) => setSessionNumber(event.target.value)} /></label><label>Entrenador<input value={coach} onChange={(event) => setCoach(event.target.value)} /></label></div>
+        <label>Notes<textarea value={notes} onChange={(event) => setNotes(event.target.value)} /></label>
+        <fieldset><legend>Activació</legend>
+          <label>Prevenció<input value={activation.prevencion} onChange={(event) => setActivation((current) => ({ ...current, prevencion: event.target.value }))} /></label>
+          <label>Activació porters<input value={activation.activacionPorteros} onChange={(event) => setActivation((current) => ({ ...current, activacionPorteros: event.target.value }))} /></label>
+          <label>Activació jugadors<input value={activation.activacionJugadores} onChange={(event) => setActivation((current) => ({ ...current, activacionJugadores: event.target.value }))} /></label>
+          <label>Integrat<input value={activation.integrado} onChange={(event) => setActivation((current) => ({ ...current, integrado: event.target.value }))} /></label>
+          <label>Participatiu<input value={activation.participativo} onChange={(event) => setActivation((current) => ({ ...current, participativo: event.target.value }))} /></label>
+        </fieldset>
+        <fieldset><legend>Blocs de la sessió (màx. 3)</legend>
+          {blocks.map((block, index) => <div key={index} className="ficha-block"><label>Descripció<textarea required={index === 0} value={block.description} onChange={(event) => updateBlock(index, { description: event.target.value })} /></label><label>Exercici del banc (opcional)<select value={block.exerciseId} onChange={(event) => updateBlock(index, { exerciseId: event.target.value })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label><label>Enllaç al diagrama (opcional)<input type="url" value={block.diagramAssetUrl} onChange={(event) => updateBlock(index, { diagramAssetUrl: event.target.value })} placeholder="https://…" /></label></div>)}
+          {blocks.length < 3 && <button type="button" className="text-action" onClick={() => setBlocks((current) => [...current, { ...EMPTY_FICHA_BLOCK }])}>Afegir bloc</button>}
+        </fieldset>
+      </>}
+    {error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onCancel}>Cancel·lar</button><button disabled={saving}>{saving ? "Desant…" : "Desar"}</button></div></form></section></div>;
 }
 
 function Login({ onLogin, loading, error }: { onLogin: (email: string, password: string) => Promise<void>; loading: boolean; error: string }) {

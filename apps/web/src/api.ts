@@ -8,10 +8,27 @@ export type CurrentUser = {
   sport_role: string | null; global_access: boolean; teams: Team[];
 };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
+// Training's shape matches docs/ficha-entreno-schema.md (JME-42); match is
+// unchanged from JME-10. Activation fields are per-phase free text, not
+// booleans — see that doc for why.
+export type TrainingActivation = {
+  prevencion?: string; activacionPorteros?: string; activacionJugadores?: string; integrado?: string; participativo?: string;
+};
+export type TrainingBlockInput = { description: string; diagramAssetUrl?: string; exerciseId?: string };
+export type TrainingBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null };
+export type RecordInput =
+  | { type: "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }
+  | { type: "training"; happenedAt: string; sessionNumber?: number; coach?: string; notes?: string; activation?: TrainingActivation; blocks: TrainingBlockInput[] };
 export type TeamRecord = {
   id: string; record_type: "training" | "match"; happened_at: string;
-  content: { summary: string; outcome?: string | null; nextObjectives?: string[] };
+  content:
+    | { summary: string; outcome?: string | null; nextObjectives?: string[] }
+    | { sessionNumber: number | null; coach: string | null; notes: string | null; activation: TrainingActivation; blocks: TrainingBlock[] };
   created_at: string; created_by_name?: string;
+};
+export type Exercise = {
+  id: string; name: string; type: "juego" | "circuito" | "ejercicio" | "tactica"; description: string | null;
+  variants: string[]; tags: string[]; source_document_id: string | null; page_ref: string | null; created_at: string;
 };
 export type CoordinatorOverview = {
   teams: Array<Team & { staff_count: number; record_count: number; last_activity_at: string | null }>;
@@ -64,8 +81,9 @@ export const api = {
       body: JSON.stringify({ teamId, message, history: history.slice(-10).map(({ role, content }) => ({ role, content })) }),
     }, token),
   records: (token: string, teamId: string) => request<{ records: TeamRecord[] }>(`/v1/teams/${teamId}/records`, {}, token),
-  createRecord: (token: string, teamId: string, record: { type: "training" | "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }) =>
+  createRecord: (token: string, teamId: string, record: RecordInput) =>
     request<TeamRecord>(`/v1/teams/${teamId}/records`, { method: "POST", body: JSON.stringify(record) }, token),
+  exercises: (token: string) => request<{ exercises: Exercise[] }>("/v1/exercises", {}, token),
   coordinatorOverview: (token: string) => request<CoordinatorOverview>("/v1/coordinator/overview", {}, token),
   plan: (token: string, teamId: string) => request<{ plan: TeamPlan | null }>(`/v1/teams/${teamId}/plan`, {}, token),
   savePlan: (token: string, teamId: string, plan: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string; version?: number }) => request<TeamPlan>(`/v1/teams/${teamId}/plan`, { method: "PUT", body: JSON.stringify(plan) }, token),
