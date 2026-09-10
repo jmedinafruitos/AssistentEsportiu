@@ -91,9 +91,13 @@ export type EventTypeActionTemplate = {
 export type FecapaSyncSummary = { leagues: number; matchesSeen: number; eventsCreated: number; eventsUpdated: number };
 
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
+  // Only set content-type when there's actually a body — Fastify's default
+  // JSON parser rejects a request with this header but no body outright
+  // (FST_ERR_CTP_EMPTY_JSON_BODY), which silently 400'd every no-body POST
+  // (syncFecapa, and now startPreparation/finalizePreparation/sendPreparation).
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
-    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...options.headers },
+    headers: { ...(options.body ? { "content-type": "application/json" } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}), ...options.headers },
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { message?: string };
