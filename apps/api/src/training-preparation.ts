@@ -187,7 +187,10 @@ export async function draftInitialContent(ai: ConfigurableAiService, context: Tr
     },
     { role: "user", content: contextPrompt(context) },
   ];
-  const result = await ai.complete(messages);
+  // The full-context draft is the heaviest call in this module — a large
+  // prompt (team/periodization/exercises/plan) asking for a full JSON
+  // document back; the chat-tuned default timeout wasn't enough in practice.
+  const result = await ai.complete(messages, 60_000);
   return trainingContentSchema.parse(parseJsonResponse(result.content));
 }
 
@@ -220,7 +223,7 @@ export async function refineSection(
       },
       { role: "user", content: `Fase: ${step.phase}\nText actual: ${current || "(buit)"}\nFeedback de l'entrenador: ${instruction}` },
     ];
-    const result = await ai.complete(messages);
+    const result = await ai.complete(messages, 45_000);
     const { value } = activationValueSchema.parse(parseJsonResponse(result.content));
     return { ...content, activation: { ...content.activation, [step.phase]: value } };
   }
@@ -242,7 +245,7 @@ export async function refineSection(
         `Banc d'exercicis disponible: ${JSON.stringify(candidateExercises)}`,
     },
   ];
-  const result = await ai.complete(messages);
+  const result = await ai.complete(messages, 45_000);
   const updated = blockValueSchema.parse(parseJsonResponse(result.content));
   const blocks = content.blocks.map((existing, index) =>
     index === step.index ? { ...existing, description: updated.description, exerciseId: updated.exerciseId } : existing,

@@ -41,7 +41,7 @@ export async function condenseText(ai: ConfigurableAiService, text: string): Pro
     },
     { role: "user", content: trimmed.slice(0, MAX_CONDENSE_INPUT_CHARS) },
   ];
-  const result = await ai.complete(messages);
+  const result = await ai.complete(messages, 45_000);
   return result.content.trim();
 }
 
@@ -61,7 +61,7 @@ export async function describeTrainingImage(ai: ConfigurableAiService, buffer: B
       ],
     },
   ];
-  const result = await ai.complete(messages);
+  const result = await ai.complete(messages, 45_000);
   return result.content.trim();
 }
 

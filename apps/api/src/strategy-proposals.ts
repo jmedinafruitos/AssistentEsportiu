@@ -97,7 +97,10 @@ async function draftProposal(
         `DOCUMENT NOU — "${document.title}" (capa: ${document.layer}):\n${document.summary}`,
     },
   ];
-  const result = await ai.complete(messages);
+  // Full strategy_contexts + a document summary in the prompt, asking for a
+  // full JSON patch back — same "large context, structured JSON" profile
+  // that needed a longer budget in training-preparation.ts (JME-44).
+  const result = await ai.complete(messages, 60_000);
   const parsed = draftResponseSchema.parse(parseJsonResponse(result.content));
   return { proposedContent: parsed.proposedContent, reason: `${reasonPrefix} ${parsed.reason}`.trim() };
 }

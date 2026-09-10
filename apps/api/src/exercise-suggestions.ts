@@ -37,6 +37,6 @@ export async function suggestExercisesFromSummary(
     },
     { role: "user", content: `DOCUMENT — "${documentTitle}":\n${summary}` },
   ];
-  const result = await ai.complete(messages);
+  const result = await ai.complete(messages, 45_000);
   return suggestionSchema.parse(parseJsonResponse(result.content)).exercises;
 }
