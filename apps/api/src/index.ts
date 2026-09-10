@@ -8,6 +8,7 @@ import { Pool, types } from "pg";
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
 import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
+import { driveConfigured, syncDriveDocuments } from "./drive.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } from "./training-series.js";
@@ -31,6 +32,9 @@ const env = z.object({
   AI_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   AI_MODEL: z.string().min(1).default("gpt-5-mini"),
   WEB_ORIGIN: z.string().url().optional(),
+  GOOGLE_SERVICE_ACCOUNT_EMAIL: z.string().email().optional(),
+  GOOGLE_SERVICE_ACCOUNT_KEY: z.string().min(1).optional(),
+  DRIVE_FOLDER_ID: z.string().min(1).optional(),
 }).parse(process.env);
 
 const app = Fastify({ logger: true });
@@ -44,6 +48,11 @@ const ai = new ConfigurableAiService({
   baseUrl: env.AI_BASE_URL,
   model: env.AI_MODEL,
 });
+const driveConfig = {
+  serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  serviceAccountKey: env.GOOGLE_SERVICE_ACCOUNT_KEY,
+  folderId: env.DRIVE_FOLDER_ID,
+};
 
 await app.register(cors, { origin: env.WEB_ORIGIN ?? false });
 await app.register(jwt, { secret: env.JWT_SECRET });
@@ -1001,6 +1010,38 @@ app.post("/v1/fecapa/sync", { onRequest: [async (request) => request.jwtVerify()
     return reply.code(502).send({ message: "FECAPA sync failed" });
   }
 });
+
+app.post("/v1/drive/sync", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  if (!driveConfigured(driveConfig)) return reply.code(503).send({ message: "Drive sync is not configured" });
+  try {
+    return await syncDriveDocuments(db, driveConfig);
+  } catch (error) {
+    request.log.error({ err: error }, "Drive manual sync failed");
+    return reply.code(502).send({ message: "Drive sync failed" });
+  }
+});
+
+// Coordinator keeps editing EstrategiaHCS in Drive as normal; this just
+// polls for changes on a fixed cadence rather than a specific day/time —
+// unlike FECAPA there's no external server to be a considerate guest of, and
+// a simple fixed interval is enough to keep source_documents fresh.
+const DRIVE_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
+function scheduleDriveSync() {
+  if (!driveConfigured(driveConfig)) {
+    app.log.info("Drive sync not configured (service account or DRIVE_FOLDER_ID missing); skipping");
+    return;
+  }
+  setTimeout(() => {
+    void syncDriveDocuments(db, driveConfig)
+      .then((summary) => app.log.info({ summary }, "Drive sync completed"))
+      .catch((error) => app.log.error({ err: error }, "Drive scheduled sync failed"))
+      .finally(() => scheduleDriveSync());
+  }, DRIVE_SYNC_INTERVAL_MS);
+}
+scheduleDriveSync();
 
 // Runs every Monday and Thursday at 03:00 Europe/Madrid (low-traffic hour,
 // avoids hammering FECAPA's server during the day) rather than a fixed
