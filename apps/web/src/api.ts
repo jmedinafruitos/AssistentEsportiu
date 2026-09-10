@@ -26,6 +26,37 @@ export type TeamRecord = {
     | { sessionNumber: number | null; coach: string | null; notes: string | null; activation: TrainingActivation; blocks: TrainingBlock[] };
   created_at: string; created_by_name?: string;
 };
+// JME-44: AI-assisted training-session preparation. Step order mirrors
+// apps/api/src/training-preparation.ts's deriveSteps exactly — 5 fixed
+// activation phases, then one entry per draft block, then "review".
+export const ACTIVATION_PHASES = ["prevencion", "activacionPorteros", "activacionJugadores", "integrado", "participativo"] as const;
+export type ActivationPhase = (typeof ACTIVATION_PHASES)[number];
+export const ACTIVATION_LABELS: Record<ActivationPhase, string> = {
+  prevencion: "Prevenció", activacionPorteros: "Activació porters", activacionJugadores: "Activació jugadors",
+  integrado: "Integrat", participativo: "Participatiu",
+};
+export type PreparationStep = { kind: "activation"; phase: ActivationPhase } | { kind: "block"; index: number } | { kind: "review" };
+export function derivePreparationSteps(content: PreparationContent): PreparationStep[] {
+  return [
+    ...ACTIVATION_PHASES.map((phase): PreparationStep => ({ kind: "activation", phase })),
+    ...content.blocks.map((_, index): PreparationStep => ({ kind: "block", index })),
+    { kind: "review" },
+  ];
+}
+export type PreparationBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null };
+export type PreparationContent = {
+  sessionNumber: number | null; coach: string | null; notes: string | null;
+  activation: Record<ActivationPhase, string>;
+  blocks: PreparationBlock[];
+};
+export type TrainingPreparation = { id: string; status: "drafting" | "ready" | "sent"; draft_content: PreparationContent; current_step: number };
+export type RefineAction =
+  | { action: "approve" }
+  | { action: "back" }
+  | { action: "feedback"; instruction: string }
+  | { action: "swap_exercise"; exerciseId: string | null }
+  | { action: "edit"; value: string };
+
 export type Exercise = {
   id: string; name: string; type: "juego" | "circuito" | "ejercicio" | "tactica"; description: string | null;
   variants: string[]; tags: string[]; source_document_id: string | null; page_ref: string | null; created_at: string;
@@ -84,6 +115,25 @@ export const api = {
   createRecord: (token: string, teamId: string, record: RecordInput) =>
     request<TeamRecord>(`/v1/teams/${teamId}/records`, { method: "POST", body: JSON.stringify(record) }, token),
   exercises: (token: string) => request<{ exercises: Exercise[] }>("/v1/exercises", {}, token),
+  getPreparation: (token: string, teamId: string, eventId: string) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation`, {}, token),
+  startPreparation: (token: string, teamId: string, eventId: string) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation`, { method: "POST" }, token),
+  updatePreparationHeader: (token: string, teamId: string, eventId: string, header: { sessionNumber?: number | null; coach?: string | null; notes?: string | null }) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation/header`, { method: "PATCH", body: JSON.stringify(header) }, token),
+  refinePreparationStep: (token: string, teamId: string, eventId: string, step: number, action: RefineAction) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation/steps/${step}`, { method: "POST", body: JSON.stringify(action) }, token),
+  finalizePreparation: (token: string, teamId: string, eventId: string) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation/finalize`, { method: "POST" }, token),
+  previewPreparationPdf: async (token: string, teamId: string, eventId: string): Promise<Blob> => {
+    const response = await fetch(`${API_URL}/v1/teams/${teamId}/events/${eventId}/preparation/pdf`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  },
+  sendPreparation: (token: string, teamId: string, eventId: string) =>
+    request<{ id: string; status: string; sent_at: string; recipients: string[] }>(`/v1/teams/${teamId}/events/${eventId}/preparation/send`, { method: "POST" }, token),
   coordinatorOverview: (token: string) => request<CoordinatorOverview>("/v1/coordinator/overview", {}, token),
   plan: (token: string, teamId: string) => request<{ plan: TeamPlan | null }>(`/v1/teams/${teamId}/plan`, {}, token),
   savePlan: (token: string, teamId: string, plan: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string; version?: number }) => request<TeamPlan>(`/v1/teams/${teamId}/plan`, { method: "PUT", body: JSON.stringify(plan) }, token),

@@ -12,6 +12,23 @@ import { driveConfigured, syncDriveDocuments } from "./drive.js";
 import { extractPendingDocuments } from "./extraction.js";
 import { suggestExercisesFromSummary } from "./exercise-suggestions.js";
 import { syncEventToCalendar } from "./google-calendar.js";
+import { emailConfigured, sendEmail } from "./resend.js";
+import {
+  applyManualEdit,
+  buildEmailHtml,
+  buildEmailSubject,
+  buildTrainingContext,
+  draftInitialContent,
+  refineSection,
+  resolveExerciseNames,
+  resolveRecipients,
+  resolveStep,
+  swapExercise,
+  totalSteps,
+  TrainingContent,
+  trainingContentSchema,
+} from "./training-preparation.js";
+import { generateTrainingPdf } from "./training-preparation-pdf.js";
 import { generateStrategyProposals } from "./strategy-proposals.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
@@ -40,6 +57,8 @@ const env = z.object({
   GOOGLE_SERVICE_ACCOUNT_KEY: z.string().min(1).optional(),
   DRIVE_FOLDER_ID: z.string().min(1).optional(),
   GOOGLE_CALENDAR_ID: z.string().min(1).optional(),
+  RESEND_API_KEY: z.string().min(1).optional(),
+  RESEND_FROM_EMAIL: z.string().email().optional(),
 }).parse(process.env);
 
 const app = Fastify({ logger: true });
@@ -65,6 +84,7 @@ const calendarConfig = {
   serviceAccountKey: env.GOOGLE_SERVICE_ACCOUNT_KEY,
   calendarId: env.GOOGLE_CALENDAR_ID,
 };
+const emailConfig = { apiKey: env.RESEND_API_KEY, fromEmail: env.RESEND_FROM_EMAIL };
 
 await app.register(cors, { origin: env.WEB_ORIGIN ?? false });
 await app.register(jwt, { secret: env.JWT_SECRET });
@@ -1025,6 +1045,282 @@ app.post("/v1/exercises/suggest", { onRequest: [async (request) => request.jwtVe
     return reply.code(502).send({ message: "Exercise suggestion failed" });
   }
 });
+
+// JME-44: AI-assisted training-session preparation, reviewed one
+// phase/exercise at a time. Draft shape and step order live in
+// training-preparation.ts; these routes are thin request/DB glue.
+app.post("/v1/teams/:teamId/events/:eventId/preparation", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+  const existing = await db.query(
+    `SELECT id, status, draft_content, current_step FROM training_preparations WHERE team_event_id = $1`,
+    [eventId],
+  );
+  if (existing.rowCount) return existing.rows[0];
+
+  const event = await db.query(`SELECT event_type FROM team_events WHERE id = $1 AND team_id = $2`, [eventId, teamId]);
+  if (!event.rowCount) return reply.code(404).send({ message: "Event not found" });
+  if ((event.rows[0] as { event_type: string }).event_type !== "training") {
+    return reply.code(400).send({ message: "Preparation is only available for training events" });
+  }
+  if (!ai.configured) return reply.code(503).send({ message: "AI service is not configured" });
+
+  try {
+    const context = await buildTrainingContext(db, teamId, eventId);
+    const draft = await draftInitialContent(ai, context);
+    const created = await db.query(
+      `INSERT INTO training_preparations (team_event_id, team_id, draft_content, created_by)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, status, draft_content, current_step`,
+      [eventId, teamId, draft, identity.sub],
+    );
+    return reply.code(201).send(created.rows[0]);
+  } catch (error) {
+    request.log.error({ err: error, eventId }, "Training preparation draft failed");
+    return reply.code(502).send({ message: "Could not draft the training preparation" });
+  }
+});
+
+app.get("/v1/teams/:teamId/events/:eventId/preparation", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT id, status, draft_content, current_step FROM training_preparations WHERE team_event_id = $1`,
+    [eventId],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+  return result.rows[0];
+});
+
+// Header fields (sessionNumber/coach/notes) sit outside the phase/block step
+// sequence — edited inline, always visible, per JME-44's design.
+app.patch(
+  "/v1/teams/:teamId/events/:eventId/preparation/header",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+    const body = z.object({
+      sessionNumber: z.number().int().positive().nullable().optional(),
+      coach: z.string().trim().max(200).nullable().optional(),
+      notes: z.string().trim().max(2_000).nullable().optional(),
+    }).parse(request.body);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+    const existing = await db.query(
+      `SELECT id, status, draft_content FROM training_preparations WHERE team_event_id = $1`,
+      [eventId],
+    );
+    if (!existing.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+    const row = existing.rows[0] as { id: string; status: string; draft_content: TrainingContent };
+    if (row.status !== "drafting") return reply.code(409).send({ message: "Preparation is no longer editable" });
+
+    const content = trainingContentSchema.parse(row.draft_content);
+    const updatedContent: TrainingContent = {
+      ...content,
+      sessionNumber: "sessionNumber" in body ? body.sessionNumber ?? null : content.sessionNumber,
+      coach: "coach" in body ? body.coach ?? null : content.coach,
+      notes: "notes" in body ? body.notes ?? null : content.notes,
+    };
+    const updated = await db.query(
+      `UPDATE training_preparations SET draft_content = $2, updated_at = now() WHERE id = $1
+       RETURNING id, status, draft_content, current_step`,
+      [row.id, updatedContent],
+    );
+    return updated.rows[0];
+  },
+);
+
+const refineActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("approve") }),
+  z.object({ action: z.literal("back") }),
+  z.object({ action: z.literal("feedback"), instruction: z.string().trim().min(1).max(1_000) }),
+  z.object({ action: z.literal("swap_exercise"), exerciseId: z.string().uuid().nullable() }),
+  z.object({ action: z.literal("edit"), value: z.string().trim().max(1_000) }),
+]);
+
+app.post(
+  "/v1/teams/:teamId/events/:eventId/preparation/steps/:step",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId, step: stepParam } = z
+      .object({ teamId: z.string().uuid(), eventId: z.string().uuid(), step: z.coerce.number().int().min(0) })
+      .parse(request.params);
+    const body = refineActionSchema.parse(request.body);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query(
+        `SELECT id, status, draft_content, current_step FROM training_preparations WHERE team_event_id = $1 FOR UPDATE`,
+        [eventId],
+      );
+      if (!existing.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ message: "No preparation yet" });
+      }
+      const row = existing.rows[0] as { id: string; status: string; draft_content: TrainingContent; current_step: number };
+      if (row.status !== "drafting") {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ message: "Preparation is no longer editable" });
+      }
+
+      let content = trainingContentSchema.parse(row.draft_content);
+      const step = resolveStep(content, stepParam);
+      let currentStep = row.current_step;
+
+      if (body.action === "approve") {
+        currentStep = Math.min(currentStep + 1, totalSteps(content) - 1);
+      } else if (body.action === "back") {
+        currentStep = Math.max(currentStep - 1, 0);
+      } else if (body.action === "feedback") {
+        const context = await buildTrainingContext(db, teamId, eventId);
+        content = await refineSection(ai, content, step, body.instruction, context.candidateExercises);
+      } else if (body.action === "swap_exercise") {
+        content = swapExercise(content, step, body.exerciseId);
+      } else {
+        content = applyManualEdit(content, step, body.value);
+      }
+
+      const updated = await client.query(
+        `UPDATE training_preparations SET draft_content = $2, current_step = $3, updated_at = now()
+         WHERE id = $1 RETURNING id, status, draft_content, current_step`,
+        [row.id, content, currentStep],
+      );
+      await client.query("COMMIT");
+      return updated.rows[0];
+    } catch (error) {
+      await client.query("ROLLBACK");
+      const message = error instanceof Error ? error.message : "";
+      if (message === "AI_NOT_CONFIGURED") return reply.code(503).send({ message: "AI service is not configured" });
+      if (["STEP_OUT_OF_RANGE", "REVIEW_STEP_HAS_NO_CONTENT", "SWAP_ONLY_VALID_FOR_BLOCKS"].includes(message)) {
+        return reply.code(400).send({ message });
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+);
+
+app.post(
+  "/v1/teams/:teamId/events/:eventId/preparation/finalize",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+    const existing = await db.query(
+      `SELECT id, status, draft_content, current_step FROM training_preparations WHERE team_event_id = $1`,
+      [eventId],
+    );
+    if (!existing.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+    const row = existing.rows[0] as { id: string; status: string; draft_content: TrainingContent; current_step: number };
+    if (row.status !== "drafting") return reply.code(409).send({ message: "Already finalized" });
+    const content = trainingContentSchema.parse(row.draft_content);
+    if (row.current_step !== totalSteps(content) - 1) {
+      return reply.code(409).send({ message: "Every phase and block must be approved first" });
+    }
+    const updated = await db.query(
+      `UPDATE training_preparations SET status = 'ready', updated_at = now() WHERE id = $1
+       RETURNING id, status, draft_content, current_step`,
+      [row.id],
+    );
+    return updated.rows[0];
+  },
+);
+
+app.get(
+  "/v1/teams/:teamId/events/:eventId/preparation/pdf",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+    const result = await db.query(
+      `SELECT tp.status, tp.draft_content, t.name AS team_name, te.starts_at
+       FROM training_preparations tp
+       JOIN teams t ON t.id = tp.team_id
+       JOIN team_events te ON te.id = tp.team_event_id
+       WHERE tp.team_event_id = $1`,
+      [eventId],
+    );
+    if (!result.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+    const row = result.rows[0] as { status: string; draft_content: TrainingContent; team_name: string; starts_at: string | Date };
+    if (row.status === "drafting") return reply.code(409).send({ message: "Finalize the preparation first" });
+
+    const content = trainingContentSchema.parse(row.draft_content);
+    const exerciseNames = await resolveExerciseNames(db, content.blocks.map((block) => block.exerciseId));
+    const eventDate = new Date(row.starts_at).toISOString().slice(0, 10);
+    const pdf = await generateTrainingPdf(row.team_name, eventDate, content, exerciseNames);
+    reply.header("content-type", "application/pdf");
+    reply.header("content-disposition", `inline; filename="entrenament.pdf"`);
+    return reply.send(pdf);
+  },
+);
+
+app.post(
+  "/v1/teams/:teamId/events/:eventId/preparation/send",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+    if (!emailConfigured(emailConfig)) return reply.code(503).send({ message: "Email is not configured" });
+
+    const result = await db.query(
+      `SELECT tp.id, tp.status, tp.draft_content, tp.created_by, t.name AS team_name, te.starts_at
+       FROM training_preparations tp
+       JOIN teams t ON t.id = tp.team_id
+       JOIN team_events te ON te.id = tp.team_event_id
+       WHERE tp.team_event_id = $1`,
+      [eventId],
+    );
+    if (!result.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+    const row = result.rows[0] as {
+      id: string; status: string; draft_content: TrainingContent; created_by: string; team_name: string; starts_at: string | Date;
+    };
+    if (row.status !== "ready") return reply.code(409).send({ message: "Finalize the preparation first" });
+
+    const content = trainingContentSchema.parse(row.draft_content);
+    const eventDate = new Date(row.starts_at).toISOString().slice(0, 10);
+    const exerciseNames = await resolveExerciseNames(db, content.blocks.map((block) => block.exerciseId));
+    const pdf = await generateTrainingPdf(row.team_name, eventDate, content, exerciseNames);
+    const recipients = await resolveRecipients(db, teamId, row.created_by);
+
+    try {
+      await sendEmail(emailConfig, {
+        to: recipients,
+        subject: buildEmailSubject(row.team_name, eventDate, content),
+        html: buildEmailHtml(row.team_name, eventDate, content),
+        attachments: [{ filename: "entrenament.pdf", content: pdf, contentType: "application/pdf" }],
+      });
+    } catch (error) {
+      request.log.error({ err: error, eventId }, "Training preparation email failed");
+      return reply.code(502).send({ message: "Could not send the email" });
+    }
+
+    const updated = await db.query(
+      `UPDATE training_preparations SET status = 'sent', sent_at = now() WHERE id = $1 RETURNING id, status, sent_at`,
+      [row.id],
+    );
+    return { ...updated.rows[0], recipients };
+  },
+);
 
 app.post("/v1/chat", {
   onRequest: [async (request) => request.jwtVerify()],

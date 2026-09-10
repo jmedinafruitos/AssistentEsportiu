@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, EventAction, EventTypeActionTemplate, Exercise, RecordInput, Team, TeamEvent, TeamPlan, TrainingSeries } from "./api";
+import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventTypeActionTemplate, Exercise, RecordInput, RefineAction, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -25,6 +25,7 @@ function App() {
   const [creatingEvent, setCreatingEvent] = useState(false);
   const [managingTemplates, setManagingTemplates] = useState(false);
   const [syncingFecapa, setSyncingFecapa] = useState(false);
+  const [preparingEventId, setPreparingEventId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!token) return;
@@ -99,7 +100,7 @@ function App() {
       {events.length
         ? <ul className="event-list">{events.map((event) => {
             const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
-            return <li key={event.id}><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button></li>;
+            return <li key={event.id} className="event-row"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="prepare-btn" aria-label="Prepara la sessió amb IA" title="Prepara la sessió amb IA" onClick={() => setPreparingEventId(event.id)}>IA</button>}</li>;
           })}</ul>
         : <p className="empty">Sense esdeveniments aquesta setmana.</p>}
     </section>
@@ -116,6 +117,7 @@ function App() {
     {selectedEvent && <EventDetail token={token} teamId={teamId} detail={selectedEvent} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />}
     {creatingEvent && <EventEditor token={token} teamId={teamId} onClose={() => setCreatingEvent(false)} onSaved={() => { setCreatingEvent(false); void refreshEvents(); }} />}
     {managingTemplates && <ActionTemplatesEditor token={token} teams={teams} onClose={() => setManagingTemplates(false)} />}
+    {preparingEventId && <TrainingPreparationModal token={token} teamId={teamId} eventId={preparingEventId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPreparingEventId(null)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
     <Composer disabled={!teamId || loading} onSend={send} />
@@ -264,6 +266,160 @@ function EventEditor({ token, teamId, onClose, onSaved }: { token: string; teamI
     {mode === "single"
       ? <form onSubmit={submitSingle}><label>Tipus<select value={eventType} onChange={(evt) => setEventType(evt.target.value as typeof eventType)}><option value="training">Entrenament</option><option value="match">Partit</option><option value="meeting">Reunió</option></select></label><label>Títol<input required value={title} onChange={(evt) => setTitle(evt.target.value)} placeholder="Ex: Partit vs. CE Vic" /></label><label>Data<input required type="date" value={date} onChange={(evt) => setDate(evt.target.value)} /></label><label>Hora d'inici<input required type="time" value={time} onChange={(evt) => setTime(evt.target.value)} /></label><label>Hora de fi (opcional)<input type="time" value={endTime} onChange={(evt) => setEndTime(evt.target.value)} /></label><label>Lloc<input value={location} onChange={(evt) => setLocation(evt.target.value)} placeholder="Opcional" /></label><label>Notes<textarea value={notes} onChange={(evt) => setNotes(evt.target.value)} /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Cancel·lar</button><button disabled={saving}>{saving ? "Desant…" : "Desar"}</button></div></form>
       : <form onSubmit={submitRecurring}><label>Títol (opcional)<input value={title} onChange={(evt) => setTitle(evt.target.value)} placeholder="Entrenament" /></label><fieldset><legend>Dies de la setmana</legend>{weekdayLabels.map((label, day) => <label key={day} className="weekday-toggle"><input type="checkbox" checked={weekdays.includes(day)} onChange={() => toggleWeekday(day)} />{label}</label>)}</fieldset><label>Hora<input required type="time" value={recurTime} onChange={(evt) => setRecurTime(evt.target.value)} /></label><label>Durada en minuts (opcional)<input type="number" min="1" max="600" value={durationMinutes} onChange={(evt) => setDurationMinutes(evt.target.value)} placeholder="60" /></label><label>Des de<input required type="date" value={from} onChange={(evt) => setFrom(evt.target.value)} /></label><label>Fins a<input required type="date" value={to} onChange={(evt) => setTo(evt.target.value)} /></label>{error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Cancel·lar</button><button disabled={saving || !weekdays.length}>{saving ? "Generant…" : "Generar"}</button></div></form>}
+  </section></div>;
+}
+
+const PHASE_QUICK_OPTIONS = ["Escurça-ho", "Allarga-ho", "Canvia l'enfocament"];
+const BLOCK_QUICK_OPTIONS = ["Fes-ho més senzill", "Fes-ho més difícil", "Escurça-ho", "Allarga-ho", "Afegeix una variant"];
+
+// JME-44: drafts, then walks the coach through approving one activation
+// phase / block at a time (never a free-form chat) before generating the
+// one-page PDF and emailing it. See docs/ficha-entreno-schema.md for the
+// content shape and apps/api/src/training-preparation.ts for step order.
+function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }: { token: string; teamId: string; eventId: string; teamName: string; onClose: () => void }) {
+  const [prep, setPrep] = useState<TrainingPreparation | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [feedback, setFeedback] = useState("");
+  const [exercises, setExercises] = useState<Exercise[]>([]);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const [sentTo, setSentTo] = useState<string[] | null>(null);
+  const [header, setHeader] = useState({ sessionNumber: "", coach: "", notes: "" });
+  const [manualText, setManualText] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const found = await api.getPreparation(token, teamId, eventId);
+        if (active) setPrep(found);
+      } catch {
+        try {
+          const created = await api.startPreparation(token, teamId, eventId);
+          if (active) setPrep(created);
+        } catch {
+          if (active) setError("No s'ha pogut generar la proposta inicial. Comprova que la IA estigui configurada.");
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [token, teamId, eventId]);
+
+  useEffect(() => { void api.exercises(token).then((result) => setExercises(result.exercises)).catch(() => {}); }, [token]);
+  useEffect(() => { return () => { if (pdfUrl) URL.revokeObjectURL(pdfUrl); }; }, [pdfUrl]);
+
+  const content = prep?.draft_content ?? null;
+  const steps = content ? derivePreparationSteps(content) : [];
+  const step = content && prep ? steps[prep.current_step] : null;
+  const isReview = step?.kind === "review";
+  const currentText = content && step
+    ? step.kind === "activation" ? content.activation[step.phase] : step.kind === "block" ? content.blocks[step.index].description : ""
+    : "";
+
+  useEffect(() => {
+    if (content) setHeader({ sessionNumber: content.sessionNumber?.toString() ?? "", coach: content.coach ?? "", notes: content.notes ?? "" });
+  }, [content?.sessionNumber, content?.coach, content?.notes]);
+  useEffect(() => { setManualText(currentText); }, [currentText]);
+
+  async function saveHeader() {
+    if (!prep) return;
+    setError("");
+    try {
+      setPrep(await api.updatePreparationHeader(token, teamId, eventId, {
+        sessionNumber: header.sessionNumber ? Number(header.sessionNumber) : null,
+        coach: header.coach || null,
+        notes: header.notes || null,
+      }));
+    } catch { setError("No s'ha pogut desar la capçalera."); }
+  }
+
+  async function apply(action: RefineAction) {
+    if (!prep) return;
+    setBusy(true); setError(""); setFeedback("");
+    try { setPrep(await api.refinePreparationStep(token, teamId, eventId, prep.current_step, action)); }
+    catch { setError("No s'ha pogut aplicar el canvi."); }
+    finally { setBusy(false); }
+  }
+
+  async function skip() {
+    if (!prep) return;
+    setBusy(true); setError("");
+    try {
+      const edited = await api.refinePreparationStep(token, teamId, eventId, prep.current_step, { action: "edit", value: "" });
+      setPrep(await api.refinePreparationStep(token, teamId, eventId, edited.current_step, { action: "approve" }));
+    } catch { setError("No s'ha pogut saltar la fase."); }
+    finally { setBusy(false); }
+  }
+
+  async function finalize() {
+    if (!prep) return;
+    setBusy(true); setError("");
+    try { setPrep(await api.finalizePreparation(token, teamId, eventId)); }
+    catch { setError("Falten passos per aprovar abans de finalitzar."); }
+    finally { setBusy(false); }
+  }
+
+  async function previewPdf() {
+    setBusy(true); setError("");
+    try { setPdfUrl(URL.createObjectURL(await api.previewPreparationPdf(token, teamId, eventId))); }
+    catch { setError("No s'ha pogut generar el PDF."); }
+    finally { setBusy(false); }
+  }
+
+  async function sendEmail() {
+    setBusy(true); setError("");
+    try { setSentTo((await api.sendPreparation(token, teamId, eventId)).recipients); }
+    catch { setError("No s'ha pogut enviar el correu."); }
+    finally { setBusy(false); }
+  }
+
+  return <div className="modal-backdrop" role="presentation"><section className="record-card prep-card" role="dialog" aria-modal="true" aria-labelledby="prep-title">
+    <h2 id="prep-title">Prepara l'entrenament · {teamName}</h2>
+    {loading && <p>Generant la primera proposta…</p>}
+    {error && <p className="error">{error}</p>}
+    {prep && content && <>
+      <div className="prep-header">
+        <label>Sessió núm.<input type="number" min="1" value={header.sessionNumber} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, sessionNumber: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
+        <label>Entrenador<input value={header.coach} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, coach: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
+      </div>
+      <label>Notes<textarea value={header.notes} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, notes: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
+
+      {prep.status === "drafting" && step && !isReview && <div className="prep-step">
+        <p className="prep-progress">Pas {prep.current_step + 1} de {steps.length - 1}</p>
+        <h3>{step.kind === "activation" ? ACTIVATION_LABELS[step.phase] : `Bloc ${step.index + 1}`}</h3>
+        <textarea value={manualText} onChange={(evt) => setManualText(evt.target.value)} disabled={busy} />
+        {step.kind === "block" && <label>Exercici del banc<select value={content.blocks[step.index].exerciseId ?? ""} disabled={busy} onChange={(evt) => void apply({ action: "swap_exercise", exerciseId: evt.target.value || null })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label>}
+        <div className="prep-options">
+          {(step.kind === "activation" ? PHASE_QUICK_OPTIONS : BLOCK_QUICK_OPTIONS).map((option) => <button key={option} type="button" className="text-action prep-chip" disabled={busy} onClick={() => void apply({ action: "feedback", instruction: option })}>{option}</button>)}
+          {step.kind === "activation" && <button type="button" className="text-action prep-chip" disabled={busy} onClick={() => void skip()}>Salta aquesta fase</button>}
+        </div>
+        <div className="prep-feedback"><input value={feedback} onChange={(evt) => setFeedback(evt.target.value)} placeholder="Escriu el teu propi feedback…" disabled={busy} /><button type="button" className="quiet" disabled={busy || !feedback.trim()} onClick={() => void apply({ action: "feedback", instruction: feedback })}>Envia</button></div>
+        <div className="dialog-actions">
+          <button type="button" className="quiet" disabled={busy || manualText === currentText} onClick={() => void apply({ action: "edit", value: manualText })}>Desa el text</button>
+          {prep.current_step > 0 && <button type="button" className="quiet" disabled={busy} onClick={() => void apply({ action: "back" })}>Anterior</button>}
+          <button type="button" disabled={busy} onClick={() => void apply({ action: "approve" })}>És correcte, següent</button>
+        </div>
+      </div>}
+
+      {prep.status === "drafting" && isReview && <div className="prep-step">
+        <h3>Revisió final</h3>
+        <ul className="prep-summary">{ACTIVATION_PHASES.filter((phase) => content.activation[phase]).map((phase) => <li key={phase}><strong>{ACTIVATION_LABELS[phase]}:</strong> {content.activation[phase]}</li>)}</ul>
+        <ol className="prep-summary">{content.blocks.map((block, index) => <li key={index}>{block.description}{block.exerciseId && ` (${exercises.find((exercise) => exercise.id === block.exerciseId)?.name ?? ""})`}</li>)}</ol>
+        <div className="dialog-actions"><button type="button" className="quiet" disabled={busy} onClick={() => void apply({ action: "back" })}>Anterior</button><button type="button" disabled={busy} onClick={() => void finalize()}>Finalitza</button></div>
+      </div>}
+
+      {prep.status !== "drafting" && <div className="prep-step">
+        <h3>{prep.status === "sent" ? "Enviada" : "Llesta per enviar"}</h3>
+        {!pdfUrl && <button type="button" className="quiet" disabled={busy} onClick={() => void previewPdf()}>Genera i previsualitza PDF</button>}
+        {pdfUrl && <iframe title="Previsualització PDF" src={pdfUrl} className="prep-pdf-preview" />}
+        {sentTo && <p className="notice">Enviat a: {sentTo.join(", ")}</p>}
+        {prep.status === "ready" && !sentTo && <button type="button" disabled={busy} onClick={() => void sendEmail()}>Envia per correu</button>}
+      </div>}
+    </>}
+    <div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Tancar</button></div>
   </section></div>;
 }
 
