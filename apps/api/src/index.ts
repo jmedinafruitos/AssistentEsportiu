@@ -10,6 +10,7 @@ import { ConfigurableAiService } from "./ai.js";
 import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
 import { driveConfigured, syncDriveDocuments } from "./drive.js";
 import { extractPendingDocuments } from "./extraction.js";
+import { generateStrategyProposals } from "./strategy-proposals.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } from "./training-series.js";
@@ -1040,6 +1041,19 @@ app.post("/v1/drive/extract", { onRequest: [async (request) => request.jwtVerify
   }
 });
 
+app.post("/v1/drive/generate-proposals", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  if (!ai.configured) return reply.code(503).send({ message: "AI service is not configured" });
+  try {
+    return await generateStrategyProposals(db, ai);
+  } catch (error) {
+    request.log.error({ err: error }, "Strategy proposal generation failed");
+    return reply.code(502).send({ message: "Proposal generation failed" });
+  }
+});
+
 // Coordinator keeps editing EstrategiaHCS in Drive as normal; this just
 // polls for changes on a fixed cadence rather than a specific day/time —
 // unlike FECAPA there's no external server to be a considerate guest of, and
@@ -1053,14 +1067,16 @@ function scheduleDriveSync() {
   setTimeout(() => {
     void syncDriveDocuments(db, driveConfig)
       .then((summary) => app.log.info({ summary }, "Drive sync completed"))
-      // Extraction runs right after sync so newly detected documents get a
-      // summary in the same pass — skipped (not an error) when AI isn't
-      // configured, matching the rest of the app's "AI is optional" stance.
+      // Extraction, then proposal generation, run right after sync so a
+      // newly detected document can reach a reviewable proposal in the same
+      // pass — both skipped (not an error) when AI isn't configured,
+      // matching the rest of the app's "AI is optional" stance.
       .then(() => {
         if (!ai.configured) return;
-        return extractPendingDocuments(db, driveConfig, ai).then((summary) =>
-          app.log.info({ summary }, "Drive extraction completed"),
-        );
+        return extractPendingDocuments(db, driveConfig, ai)
+          .then((summary) => app.log.info({ summary }, "Drive extraction completed"))
+          .then(() => generateStrategyProposals(db, ai))
+          .then((summary) => app.log.info({ summary }, "Strategy proposal generation completed"));
       })
       .catch((error) => app.log.error({ err: error }, "Drive scheduled sync/extraction failed"))
       .finally(() => scheduleDriveSync());
