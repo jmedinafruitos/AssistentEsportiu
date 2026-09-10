@@ -27,8 +27,13 @@ function layerFraming(layer: DocumentLayer): { instruction: string; reasonPrefix
   if (layer === OFFICIAL_LAYER) {
     return {
       instruction:
-        "Aquest document és una font de PROGRAMACIÓ OFICIAL (capa 'estructura'). " +
-        "Pots proposar canvis directes a l'estructura o la periodització.",
+        "Aquest document és una font de PROGRAMACIÓ OFICIAL (capa 'estructura'). Pots proposar canvis directes " +
+        "a l'estructura o la periodització. Si el canvi és sobre periodització, escriu-lo sota la clau " +
+        "'periodization' amb aquesta forma (docs/periodization-schema.md): 'trimesters': " +
+        "[{index, label, starts_in, ends_in}], 'weekly_grid': {'basico'|'avanzado': [{weekday, content_area, " +
+        "duration_minutes, detail}]}, 'progression': [{session_number, content_taxonomy, status: " +
+        "'introducido'|'reforzado'}]. No inventis una altra forma si ja existeix 'periodization' al contingut " +
+        "actual — amplia-la o actualitza-la respectant-la.",
       reasonPrefix: "Font: programació oficial (capa estructura).",
     };
   }
