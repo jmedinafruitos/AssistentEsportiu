@@ -249,8 +249,11 @@ app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwt
        GROUP BY t.id, c.name ORDER BY t.name`,
     ),
     db.query(
-      `SELECT p.id, p.strategy_context_id, p.base_version, p.reason, p.proposed_at, u.name AS proposed_by_name
+      `SELECT p.id, p.strategy_context_id, p.base_version, p.reason, p.proposed_at, u.name AS proposed_by_name,
+              sd.id AS source_document_id, sd.title AS source_document_title, sd.layer AS source_document_layer,
+              sd.drive_url AS source_document_drive_url, sd.summary AS source_document_summary
        FROM strategy_change_proposals p JOIN users u ON u.id = p.proposed_by
+       LEFT JOIN source_documents sd ON sd.id = p.source_document_id
        WHERE p.status = 'pending' ORDER BY p.proposed_at DESC`,
     ),
   ]);
@@ -260,15 +263,22 @@ app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwt
 app.post("/v1/strategy-contexts/:contextId/proposals", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const { contextId } = z.object({ contextId: z.string().uuid() }).parse(request.params);
-  const body = z.object({ content: z.record(z.unknown()), version: z.number().int().positive(), reason: z.string().trim().min(3).max(1_000) }).parse(request.body);
+  const body = z.object({
+    content: z.record(z.unknown()),
+    version: z.number().int().positive(),
+    reason: z.string().trim().min(3).max(1_000),
+    sourceDocumentId: z.string().uuid().optional(),
+  }).parse(request.body);
   const result = await db.query(
     `INSERT INTO strategy_change_proposals
-       (strategy_context_id, base_version, proposed_content, reason, proposed_by)
-     SELECT sc.id, $3, $4, $5, u.id
+       (strategy_context_id, base_version, proposed_content, reason, proposed_by, source_document_id)
+     SELECT sc.id, $3, $4, $5, u.id, sd.id
      FROM users u JOIN strategy_contexts sc ON sc.id = $2
+     LEFT JOIN source_documents sd ON sd.id = $6::uuid
      WHERE u.id = $1 AND u.active = true AND u.global_access = true AND sc.version = $3
-     RETURNING id, strategy_context_id, base_version, proposed_content, reason, status, proposed_at`,
-    [identity.sub, contextId, body.version, body.content, body.reason],
+       AND ($6::uuid IS NULL OR sd.id IS NOT NULL)
+     RETURNING id, strategy_context_id, base_version, proposed_content, reason, status, proposed_at, source_document_id`,
+    [identity.sub, contextId, body.version, body.content, body.reason, body.sourceDocumentId ?? null],
   );
   if (!result.rowCount) return reply.code(409).send({ message: "Forbidden or strategy context has changed" });
   return reply.code(201).send(result.rows[0]);
