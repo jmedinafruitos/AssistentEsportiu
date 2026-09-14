@@ -72,6 +72,11 @@ function App() {
 
   if (!token || (!user && !loading)) return <Login onLogin={login} loading={loading} error={error} />;
   if (!user) return <main className="centered" aria-live="polite">Carregant el teu context…</main>;
+  // JME-47: an open event workspace takes over the whole screen instead of
+  // overlaying the home screen — "Enrere" inside each component returns
+  // here by clearing this state.
+  if (selectedEvent) return <EventDetail token={token} teamId={teamId} detail={selectedEvent} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />;
+  if (preparingEventId) return <TrainingPreparationModal token={token} teamId={teamId} eventId={preparingEventId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPreparingEventId(null)} />;
 
   return <main className="assistant-shell">
     <header className="app-header">
@@ -85,7 +90,7 @@ function App() {
       {events.length
         ? <ul className="event-list">{events.map((event) => {
             const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
-            return <li key={event.id} className="event-row"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="prepare-btn" aria-label="Prepara la sessió amb IA" title="Prepara la sessió amb IA" onClick={() => setPreparingEventId(event.id)}>IA</button>}</li>;
+            return <li key={event.id} className="event-card"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="row-action" onClick={() => setPreparingEventId(event.id)}>{prepareActionLabel(event.readiness)}</button>}</li>;
           })}</ul>
         : <p className="empty">Sense esdeveniments aquesta setmana.</p>}
     </section>
@@ -108,10 +113,8 @@ function App() {
     />}
     {recording && <RecordCapture teamName={activeTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, teamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
     {planning && <PlanningEditor token={token} teamId={teamId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
-    {selectedEvent && <EventDetail token={token} teamId={teamId} detail={selectedEvent} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />}
     {creatingEvent && <EventEditor token={token} teamId={teamId} onClose={() => setCreatingEvent(false)} onSaved={() => { setCreatingEvent(false); void refreshEvents(); }} />}
     {managingTemplates && <ActionTemplatesEditor token={token} teams={teams} onClose={() => setManagingTemplates(false)} />}
-    {preparingEventId && <TrainingPreparationModal token={token} teamId={teamId} eventId={preparingEventId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPreparingEventId(null)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
   </main>;
@@ -150,6 +153,7 @@ function HamburgerMenu({ user, teams, teamId, syncingFecapa, onClose, onSelectTe
 function eventTypeLabel(type: "training" | "match" | "meeting") { return type === "training" ? "Entrenament" : type === "match" ? "Partit" : "Reunió"; }
 function readinessDotClass(readiness: EventReadiness) { return readiness === "done" ? "done" : readiness === "in_progress" ? "wip" : "none"; }
 function readinessLabel(readiness: EventReadiness) { return readiness === "done" ? "Tot llest" : readiness === "in_progress" ? "En curs" : "No començat"; }
+function prepareActionLabel(readiness: EventReadiness) { return readiness === "done" ? "Revisa la preparació" : readiness === "in_progress" ? "Continua la preparació" : "Prepara amb IA"; }
 
 // Monday-Sunday week bounds for the calendar's pagination, offset in whole weeks from the current one.
 function weekBounds(offset: number) {
@@ -194,9 +198,18 @@ function EventDetail({ token, teamId, detail, onClose, onChanged }: { token: str
     catch { setError("No s'ha pogut actualitzar l'esdeveniment."); }
   }
   const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
-  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true"><h2>{eventTypeLabel(event.event_type)}{showTitle && ` · ${event.title}`}</h2><p className="event-meta">{formatEventDateRange(event)}{event.location && <> · {event.location}</>}</p>{event.notes && <p>{event.notes}</p>}{actions.length > 0 && <ul className="checklist">{actions.map((action) => <li key={action.id}><label><input type="checkbox" checked={Boolean(action.completed_at)} onChange={(evt) => void toggleAction(action.id, evt.target.checked)} />{action.label}</label></li>)}</ul>}{error && <p className="error">{error}</p>}<div className="dialog-actions">{event.training_series_id && <button type="button" className="quiet" onClick={() => setEditingSeries(true)}>Editar sèrie</button>}<button type="button" className="quiet" onClick={() => void toggleCanceled()}>{event.canceled ? "Reactivar" : "Cancel·lar esdeveniment"}</button><button type="button" onClick={onClose}>Tancar</button></div></section>
+  // JME-47: full-screen workspace (was a modal) — "Enrere" replaces the old
+  // bottom "Tancar" button as the way back to the events list.
+  return <main className="workspace-screen">
+    <header className="ws-header"><button type="button" className="back-btn" aria-label="Enrere" onClick={onClose}>‹</button><div className="ws-title"><strong>{eventTypeLabel(event.event_type)}{showTitle && ` · ${event.title}`}</strong><span>{formatEventDateRange(event)}{event.location && <> · {event.location}</>}</span></div></header>
+    <div className="ws-body">
+      {event.notes && <div className="notes-card">{event.notes}</div>}
+      {actions.length > 0 && <div className="checklist-card"><h3>Accions</h3><ul className="checklist">{actions.map((action) => <li key={action.id}><label><input type="checkbox" checked={Boolean(action.completed_at)} onChange={(evt) => void toggleAction(action.id, evt.target.checked)} />{action.label}</label></li>)}</ul></div>}
+      {error && <p className="error">{error}</p>}
+    </div>
+    <div className="bottom-nav">{event.training_series_id && <button type="button" className="quiet" onClick={() => setEditingSeries(true)}>Editar sèrie</button>}<button type="button" className="quiet" onClick={() => void toggleCanceled()}>{event.canceled ? "Reactivar" : "Cancel·lar esdeveniment"}</button></div>
     {editingSeries && event.training_series_id && <SeriesEditor token={token} teamId={teamId} seriesId={event.training_series_id} fromEventId={event.id} onClose={() => setEditingSeries(false)} onSaved={() => { setEditingSeries(false); onClose(); }} />}
-  </div>;
+  </main>;
 }
 
 function SeriesEditor({ token, teamId, seriesId, fromEventId, onClose, onSaved }: { token: string; teamId: string; seriesId: string; fromEventId: string; onClose: () => void; onSaved: () => void }) {
@@ -399,8 +412,12 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
     finally { setBusy(false); }
   }
 
-  return <div className="modal-backdrop" role="presentation"><section className="record-card prep-card" role="dialog" aria-modal="true" aria-labelledby="prep-title">
-    <h2 id="prep-title">Prepara l'entrenament · {teamName}</h2>
+  const totalVisibleSteps = Math.max(steps.length - 1, 1);
+  // JME-47: full-screen workspace (was a modal), matching EventDetail's new
+  // shell — "Enrere" in the header replaces the old bottom "Tancar" button.
+  return <main className="workspace-screen">
+    <header className="ws-header"><button type="button" className="back-btn" aria-label="Enrere" onClick={onClose}>‹</button><div className="ws-title"><strong>Entrenament</strong><span>{teamName}</span></div></header>
+    <div className="ws-body">
     {loading && <p>Generant la primera proposta…</p>}
     {error && <p className="error">{error}</p>}
     {prep && content && <>
@@ -411,7 +428,8 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
       <label>Notes<textarea value={header.notes} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, notes: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
 
       {prep.status === "drafting" && step && !isReview && <div className="prep-step">
-        <p className="prep-progress">Pas {prep.current_step + 1} de {steps.length - 1}</p>
+        <p className="prep-progress">Pas {prep.current_step + 1} de {totalVisibleSteps}</p>
+        <div className="progress-track"><div className="progress-fill" style={{ width: `${((prep.current_step + 1) / totalVisibleSteps) * 100}%` }} /></div>
         <h3>{step.kind === "activation" ? ACTIVATION_LABELS[step.phase] : `Bloc ${step.index + 1}`}</h3>
         <textarea value={manualText} onChange={(evt) => setManualText(evt.target.value)} disabled={busy} />
         {step.kind === "block" && <label>Exercici del banc<select value={content.blocks[step.index].exerciseId ?? ""} disabled={busy} onChange={(evt) => void apply({ action: "swap_exercise", exerciseId: evt.target.value || null })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label>}
@@ -442,8 +460,8 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
         {prep.status === "ready" && !sentTo && <button type="button" disabled={busy} onClick={() => void sendEmail()}>Envia per correu</button>}
       </div>}
     </>}
-    <div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Tancar</button></div>
-  </section></div>;
+    </div>
+  </main>;
 }
 
 function ActionTemplatesEditor({ token, teams, onClose }: { token: string; teams: Team[]; onClose: () => void }) {

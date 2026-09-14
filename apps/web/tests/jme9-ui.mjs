@@ -18,7 +18,7 @@ test("provides an authenticated, team-aware events-first home screen", () => {
   assert.match(source, /PlanningEditor/);
   assert.match(source, /HamburgerMenu/);
   assert.match(source, /status-dot/);
-  assert.match(source, /Prepara la sessió amb IA/);
+  assert.match(source, /Prepara amb IA/);
 });
 
 test("preserves the official logo and mobile layout", () => {
