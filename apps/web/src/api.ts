@@ -72,11 +72,15 @@ export type CoordinatorOverview = {
 };
 export type TeamPlan = { id: string; season: string; version: number; content: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string } };
 export type AssistantResult = { id: string; user_message: string; assistant_message: string; created_at: string; requested_by: string };
+// readiness (JME-45): "none" = not started, "in_progress" = some work done
+// (drafting a training prep, or some checklist items completed), "done" =
+// fully set (training prep ready/sent, or every checklist item completed).
+export type EventReadiness = "none" | "in_progress" | "done";
 export type TeamEvent = {
   id: string; event_type: "training" | "match" | "meeting"; title: string;
   starts_at: string; ends_at: string | null; location: string | null; notes: string | null;
   source: "manual" | "recurring" | "fecapa"; canceled: boolean; created_at: string;
-  training_series_id?: string | null; overridden?: boolean;
+  training_series_id?: string | null; overridden?: boolean; readiness: EventReadiness;
 };
 export type TrainingSeries = {
   id: string; team_id: string; title: string; weekdays: number[]; time: string;

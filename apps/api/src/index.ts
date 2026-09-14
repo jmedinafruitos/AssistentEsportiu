@@ -505,14 +505,33 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
   const allowed = await hasTeamAccess(db, identity.sub, teamId);
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
   const result = await db.query(
-    `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at,
-            training_series_id, overridden
-     FROM team_events
-     WHERE team_id = $1
-       AND archived_at IS NULL
-       AND starts_at >= COALESCE($2::timestamptz, now() - interval '1 day')
-       AND ($3::timestamptz IS NULL OR starts_at < $3::timestamptz)
-     ORDER BY starts_at ASC LIMIT 200`,
+    // readiness (JME-45) drives the row's status dot: for training it's
+    // training_preparations.status (JME-44); for match/meeting, which have
+    // no AI workflow, it's the completion ratio of the event's own
+    // checklist (team_event_actions, JME-29) instead.
+    `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.source, te.canceled, te.created_at,
+            te.training_series_id, te.overridden,
+            CASE
+              WHEN te.event_type = 'training' THEN COALESCE((
+                SELECT CASE WHEN tp.status = 'drafting' THEN 'in_progress' WHEN tp.status IN ('ready', 'sent') THEN 'done' END
+                FROM training_preparations tp WHERE tp.team_event_id = te.id
+              ), 'none')
+              ELSE COALESCE((
+                SELECT CASE
+                  WHEN count(*) = 0 THEN 'none'
+                  WHEN count(*) FILTER (WHERE tea.completed_at IS NOT NULL) = count(*) THEN 'done'
+                  WHEN count(*) FILTER (WHERE tea.completed_at IS NOT NULL) = 0 THEN 'none'
+                  ELSE 'in_progress'
+                END
+                FROM team_event_actions tea WHERE tea.team_event_id = te.id
+              ), 'none')
+            END AS readiness
+     FROM team_events te
+     WHERE te.team_id = $1
+       AND te.archived_at IS NULL
+       AND te.starts_at >= COALESCE($2::timestamptz, now() - interval '1 day')
+       AND ($3::timestamptz IS NULL OR te.starts_at < $3::timestamptz)
+     ORDER BY te.starts_at ASC LIMIT 200`,
     [teamId, query.from ?? null, query.to ?? null],
   );
   return { events: result.rows };

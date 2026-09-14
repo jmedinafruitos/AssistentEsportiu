@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventTypeActionTemplate, Exercise, RecordInput, RefineAction, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, RecordInput, RefineAction, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -100,7 +100,7 @@ function App() {
       {events.length
         ? <ul className="event-list">{events.map((event) => {
             const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
-            return <li key={event.id} className="event-row"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="prepare-btn" aria-label="Prepara la sessió amb IA" title="Prepara la sessió amb IA" onClick={() => setPreparingEventId(event.id)}>IA</button>}</li>;
+            return <li key={event.id} className="event-row"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="prepare-btn" aria-label="Prepara la sessió amb IA" title="Prepara la sessió amb IA" onClick={() => setPreparingEventId(event.id)}>IA</button>}</li>;
           })}</ul>
         : <p className="empty">Sense esdeveniments aquesta setmana.</p>}
     </section>
@@ -127,6 +127,8 @@ function App() {
 function speak(content: string) { if (!("speechSynthesis" in window)) return; window.speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(content); utterance.lang = "ca-ES"; window.speechSynthesis.speak(utterance); }
 
 function eventTypeLabel(type: "training" | "match" | "meeting") { return type === "training" ? "Entrenament" : type === "match" ? "Partit" : "Reunió"; }
+function readinessDotClass(readiness: EventReadiness) { return readiness === "done" ? "done" : readiness === "in_progress" ? "wip" : "none"; }
+function readinessLabel(readiness: EventReadiness) { return readiness === "done" ? "Tot llest" : readiness === "in_progress" ? "En curs" : "No començat"; }
 
 // Monday-Sunday week bounds for the calendar's pagination, offset in whole weeks from the current one.
 function weekBounds(offset: number) {
