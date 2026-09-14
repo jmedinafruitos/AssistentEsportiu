@@ -1,3 +1,5 @@
+import { AuthenticationResponseJSON, PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON, RegistrationResponseJSON } from "@simplewebauthn/browser";
+
 const configuredBaseUrl = (import.meta as ImportMeta & { env: { VITE_API_URL?: string } }).env.VITE_API_URL;
 const API_URL = (configuredBaseUrl ?? "").replace(/\/$/, "");
 
@@ -112,6 +114,14 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
 
 export const api = {
   login: (email: string, password: string) => request<{ token: string }>("/v1/session", { method: "POST", body: JSON.stringify({ email, password }) }),
+  webauthnRegisterOptions: (token: string) =>
+    request<PublicKeyCredentialCreationOptionsJSON>("/v1/webauthn/register/options", { method: "POST" }, token),
+  webauthnRegisterVerify: (token: string, response: RegistrationResponseJSON, deviceLabel?: string) =>
+    request<{ registered: true }>("/v1/webauthn/register/verify", { method: "POST", body: JSON.stringify({ response, deviceLabel }) }, token),
+  webauthnLoginOptions: (email: string) =>
+    request<PublicKeyCredentialRequestOptionsJSON>("/v1/webauthn/login/options", { method: "POST", body: JSON.stringify({ email }) }),
+  webauthnLoginVerify: (email: string, response: AuthenticationResponseJSON) =>
+    request<{ token: string }>("/v1/webauthn/login/verify", { method: "POST", body: JSON.stringify({ email, response }) }),
   me: (token: string) => request<CurrentUser>("/v1/me", {}, token),
   teams: (token: string) => request<{ teams: Team[] }>("/v1/teams", {}, token),
   chat: (token: string, teamId: string, message: string, history: ChatMessage[]) =>

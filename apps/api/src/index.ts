@@ -5,6 +5,15 @@ import rateLimit from "@fastify/rate-limit";
 import bcrypt from "bcryptjs";
 import Fastify from "fastify";
 import { Pool, types } from "pg";
+import {
+  AuthenticationResponseJSON,
+  AuthenticatorTransport,
+  generateAuthenticationOptions,
+  generateRegistrationOptions,
+  RegistrationResponseJSON,
+  verifyAuthenticationResponse,
+  verifyRegistrationResponse,
+} from "@simplewebauthn/server";
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
 import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
@@ -33,6 +42,7 @@ import { generateStrategyProposals } from "./strategy-proposals.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } from "./training-series.js";
+import { consumeChallenge, pruneExpiredChallenges, resolveRpConfig, storeChallenge } from "./webauthn.js";
 
 // Constant-effort placeholder hash so a request for an unknown or
 // password-less email takes roughly as long as a real mismatch,
@@ -95,6 +105,11 @@ await app.register(helmet);
 // on onRequest hook ordering between this plugin and our own jwtVerify
 // hook, and is plenty at this club's scale (one coach per connection).
 await app.register(rateLimit, { max: 200, timeWindow: "1 minute" });
+
+// JME-17 already validated app.sentmenat.cat end-to-end, so WEB_ORIGIN is
+// always the real PWA origin in every deployed environment; the localhost
+// fallback only matters for local `npm run dev`.
+const rpConfig = resolveRpConfig(env.WEB_ORIGIN);
 
 app.get("/health", async () => {
   await db.query("SELECT 1");
@@ -1444,6 +1459,156 @@ app.get("/v1/teams/:teamId/assistant-results", { onRequest: [async (request) => 
     [teamId],
   );
   return { results: result.rows };
+});
+
+// JME-43: passkey (Face ID / Touch ID / empremta) as an alternative to the
+// password login below — registration requires an existing session;
+// login does not, since it's how you get one.
+
+app.post("/v1/webauthn/register/options", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const userResult = await db.query("SELECT email, name FROM users WHERE id = $1 AND active = true", [identity.sub]);
+  const user = userResult.rows[0] as { email: string; name: string } | undefined;
+  if (!user) return reply.code(404).send({ message: "User not found" });
+
+  const existing = await db.query(
+    "SELECT credential_id, transports FROM webauthn_credentials WHERE user_id = $1",
+    [identity.sub],
+  );
+
+  const options = await generateRegistrationOptions({
+    rpName: rpConfig.rpName,
+    rpID: rpConfig.rpID,
+    userName: user.email,
+    userDisplayName: user.name,
+    attestationType: "none",
+    authenticatorSelection: { residentKey: "preferred", userVerification: "preferred", authenticatorAttachment: "platform" },
+    excludeCredentials: (existing.rows as { credential_id: string; transports: string[] }[]).map((row) => ({
+      id: row.credential_id,
+      transports: row.transports as AuthenticatorTransport[],
+    })),
+  });
+
+  await pruneExpiredChallenges(db);
+  await storeChallenge(db, options.challenge, "register", identity.sub);
+  return options;
+});
+
+app.post("/v1/webauthn/register/verify", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const body = z.object({
+    response: z.record(z.unknown()),
+    deviceLabel: z.string().trim().max(100).optional(),
+  }).parse(request.body);
+
+  const expectedChallenge = await consumeChallenge(db, identity.sub, "register");
+  if (!expectedChallenge) return reply.code(400).send({ message: "No pending registration challenge" });
+
+  let verification;
+  try {
+    verification = await verifyRegistrationResponse({
+      response: body.response as unknown as RegistrationResponseJSON,
+      expectedChallenge,
+      expectedOrigin: rpConfig.origin,
+      expectedRPID: rpConfig.rpID,
+    });
+  } catch (error) {
+    request.log.warn({ err: error }, "WebAuthn registration verification failed");
+    return reply.code(400).send({ message: "Registration verification failed" });
+  }
+  if (!verification.verified || !verification.registrationInfo) {
+    return reply.code(400).send({ message: "Registration verification failed" });
+  }
+
+  const { credential } = verification.registrationInfo;
+  await db.query(
+    `INSERT INTO webauthn_credentials (user_id, credential_id, public_key, sign_count, transports, device_label)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [identity.sub, credential.id, Buffer.from(credential.publicKey), credential.counter, credential.transports ?? [], body.deviceLabel ?? null],
+  );
+  return reply.code(201).send({ registered: true });
+});
+
+app.post("/v1/webauthn/login/options", {
+  config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
+}, async (request) => {
+  const body = z.object({ email: z.string().email() }).parse(request.body);
+  const userResult = await db.query("SELECT id FROM users WHERE email = $1 AND active = true", [body.email]);
+  const user = userResult.rows[0] as { id: string } | undefined;
+
+  const credentials = user
+    ? (await db.query(
+        "SELECT credential_id, transports FROM webauthn_credentials WHERE user_id = $1",
+        [user.id],
+      )).rows as { credential_id: string; transports: string[] }[]
+    : [];
+
+  const options = await generateAuthenticationOptions({
+    rpID: rpConfig.rpID,
+    userVerification: "preferred",
+    allowCredentials: credentials.map((row) => ({ id: row.credential_id, transports: row.transports as AuthenticatorTransport[] })),
+  });
+
+  // Same response shape and a real challenge either way — an unknown email
+  // or one with no registered passkey never gets a different answer here,
+  // matching the DUMMY_PASSWORD_HASH anti-enumeration approach /v1/session
+  // already uses. user_id is stored null in that case; login/verify then
+  // fails generically at the first lookup, same as a wrong password would.
+  await pruneExpiredChallenges(db);
+  await storeChallenge(db, options.challenge, "login", user?.id ?? null);
+  return options;
+});
+
+app.post("/v1/webauthn/login/verify", {
+  config: { rateLimit: { max: 10, timeWindow: "1 minute" } },
+}, async (request, reply) => {
+  const body = z.object({
+    email: z.string().email(),
+    response: z.record(z.unknown()),
+  }).parse(request.body);
+
+  const userResult = await db.query("SELECT id, role FROM users WHERE email = $1 AND active = true", [body.email]);
+  const user = userResult.rows[0] as { id: string; role: string } | undefined;
+  if (!user) return reply.code(401).send({ message: "Unauthorized" });
+
+  const expectedChallenge = await consumeChallenge(db, user.id, "login");
+  if (!expectedChallenge) return reply.code(401).send({ message: "Unauthorized" });
+
+  const credentialId = (body.response as { id?: unknown }).id;
+  const credentialResult = typeof credentialId === "string"
+    ? await db.query(
+        "SELECT credential_id, public_key, sign_count, transports FROM webauthn_credentials WHERE user_id = $1 AND credential_id = $2",
+        [user.id, credentialId],
+      )
+    : { rows: [] as unknown[] };
+  const stored = credentialResult.rows[0] as { credential_id: string; public_key: Buffer; sign_count: string; transports: string[] } | undefined;
+  if (!stored) return reply.code(401).send({ message: "Unauthorized" });
+
+  let verification;
+  try {
+    verification = await verifyAuthenticationResponse({
+      response: body.response as unknown as AuthenticationResponseJSON,
+      expectedChallenge,
+      expectedOrigin: rpConfig.origin,
+      expectedRPID: rpConfig.rpID,
+      credential: {
+        id: stored.credential_id,
+        publicKey: new Uint8Array(stored.public_key),
+        counter: Number(stored.sign_count),
+        transports: stored.transports as AuthenticatorTransport[],
+      },
+    });
+  } catch (error) {
+    request.log.warn({ err: error }, "WebAuthn login verification failed");
+    return reply.code(401).send({ message: "Unauthorized" });
+  }
+  if (!verification.verified) return reply.code(401).send({ message: "Unauthorized" });
+
+  await db.query(
+    "UPDATE webauthn_credentials SET sign_count = $1 WHERE credential_id = $2",
+    [verification.authenticationInfo.newCounter, stored.credential_id],
+  );
+  return { token: app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: "72h" }) };
 });
 
 app.post("/v1/session", {

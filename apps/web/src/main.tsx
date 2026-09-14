@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, RecordInput, RefineAction, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { loginWithPasskey, passkeysAvailable, registerPasskey } from "./webauthn";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -22,8 +23,12 @@ function App() {
   const [creatingEvent, setCreatingEvent] = useState(false);
   const [managingTemplates, setManagingTemplates] = useState(false);
   const [syncingFecapa, setSyncingFecapa] = useState(false);
+  const [canUsePasskeys, setCanUsePasskeys] = useState(false);
+  const [activatingPasskey, setActivatingPasskey] = useState(false);
   const [preparingEventId, setPreparingEventId] = useState<string | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+
+  useEffect(() => { void passkeysAvailable().then(setCanUsePasskeys); }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -63,14 +68,28 @@ function App() {
   const activeTeam = useMemo(() => teams.find((team) => team.id === teamId), [teams, teamId]);
   function logout() { localStorage.removeItem(TOKEN_KEY); setToken(""); setUser(null); setTeams([]); }
 
+  function applyToken(newToken: string) { localStorage.setItem(TOKEN_KEY, newToken); setToken(newToken); }
+
   async function login(email: string, password: string) {
     setLoading(true); setError("");
-    try {
-      const session = await api.login(email, password); localStorage.setItem(TOKEN_KEY, session.token); setToken(session.token);
-    } catch { setError("Correu o contrasenya incorrectes."); setLoading(false); }
+    try { applyToken((await api.login(email, password)).token); }
+    catch { setError("Correu o contrasenya incorrectes."); setLoading(false); }
   }
 
-  if (!token || (!user && !loading)) return <Login onLogin={login} loading={loading} error={error} />;
+  async function loginWithBiometrics(email: string) {
+    setLoading(true); setError("");
+    try { applyToken(await loginWithPasskey(email)); }
+    catch { setError("No s'ha pogut iniciar sessió amb Face ID / empremta. Prova amb la contrasenya."); setLoading(false); }
+  }
+
+  async function activatePasskey() {
+    setActivatingPasskey(true); setError("");
+    try { await registerPasskey(token, navigator.platform || undefined); setNotice("Login biomètric activat en aquest dispositiu."); }
+    catch { setError("No s'ha pogut activar el login biomètric en aquest dispositiu."); }
+    finally { setActivatingPasskey(false); }
+  }
+
+  if (!token || (!user && !loading)) return <Login onLogin={login} onPasskeyLogin={canUsePasskeys ? loginWithBiometrics : undefined} loading={loading} error={error} />;
   if (!user) return <main className="centered" aria-live="polite">Carregant el teu context…</main>;
   // JME-47: an open event workspace takes over the whole screen instead of
   // overlaying the home screen — "Enrere" inside each component returns
@@ -97,6 +116,7 @@ function App() {
     {overview && <CoordinatorPanel overview={overview} />}
     {menuOpen && <HamburgerMenu
       user={user} teams={teams} teamId={teamId} syncingFecapa={syncingFecapa}
+      canUsePasskeys={canUsePasskeys} activatingPasskey={activatingPasskey}
       onClose={() => setMenuOpen(false)}
       onSelectTeam={(id) => { setTeamId(id); setWeekOffset(0); setMenuOpen(false); }}
       onAddEvent={() => { setCreatingEvent(true); setMenuOpen(false); }}
@@ -104,6 +124,7 @@ function App() {
       onPlanning={() => { setPlanning(true); setMenuOpen(false); }}
       onManageTemplates={() => { setManagingTemplates(true); setMenuOpen(false); }}
       onSyncFecapa={() => { setMenuOpen(false); void syncFecapa(); }}
+      onActivatePasskey={() => void activatePasskey()}
       onShowOverview={() => {
         setMenuOpen(false);
         if (overview) setOverview(null);
@@ -124,11 +145,11 @@ function App() {
 // across the header and a chat-suggestions bar that no longer exists —
 // team switch, add event, the two things that used to be chat-suggestion
 // buttons (record activity, planning), and the coordinator-only actions.
-function HamburgerMenu({ user, teams, teamId, syncingFecapa, onClose, onSelectTeam, onAddEvent, onRecordActivity, onPlanning, onManageTemplates, onSyncFecapa, onShowOverview, onLogout }: {
-  user: CurrentUser; teams: Team[]; teamId: string; syncingFecapa: boolean;
+function HamburgerMenu({ user, teams, teamId, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onSelectTeam, onAddEvent, onRecordActivity, onPlanning, onManageTemplates, onSyncFecapa, onActivatePasskey, onShowOverview, onLogout }: {
+  user: CurrentUser; teams: Team[]; teamId: string; syncingFecapa: boolean; canUsePasskeys: boolean; activatingPasskey: boolean;
   onClose: () => void; onSelectTeam: (teamId: string) => void; onAddEvent: () => void;
   onRecordActivity: () => void; onPlanning: () => void; onManageTemplates: () => void;
-  onSyncFecapa: () => void; onShowOverview: () => void; onLogout: () => void;
+  onSyncFecapa: () => void; onActivatePasskey: () => void; onShowOverview: () => void; onLogout: () => void;
 }) {
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <aside className="drawer" role="dialog" aria-modal="true" aria-label="Menú" onClick={(event) => event.stopPropagation()}>
@@ -138,6 +159,7 @@ function HamburgerMenu({ user, teams, teamId, syncingFecapa, onClose, onSelectTe
       <button type="button" className="menu-item" onClick={onAddEvent}>Afegir esdeveniment</button>
       <button type="button" className="menu-item" onClick={onRecordActivity}>Registrar activitat</button>
       <button type="button" className="menu-item" onClick={onPlanning}>Planificació</button>
+      {canUsePasskeys && <button type="button" className="menu-item" disabled={activatingPasskey} onClick={onActivatePasskey}>{activatingPasskey ? "Activant…" : "Activa Face ID / empremta"}</button>}
       {user.global_access && <>
         <hr />
         <button type="button" className="menu-item" onClick={onManageTemplates}>Accions per tipus</button>
@@ -562,10 +584,10 @@ function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamN
     {error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onCancel}>Cancel·lar</button><button disabled={saving}>{saving ? "Desant…" : "Desar"}</button></div></form></section></div>;
 }
 
-function Login({ onLogin, loading, error }: { onLogin: (email: string, password: string) => Promise<void>; loading: boolean; error: string }) {
+function Login({ onLogin, onPasskeyLogin, loading, error }: { onLogin: (email: string, password: string) => Promise<void>; onPasskeyLogin?: (email: string) => Promise<void>; loading: boolean; error: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  return <main className="login"><section className="login-card"><img className="club-logo" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1><p className="intro">Planifica, registra i acompanya l'evolució del teu equip.</p><form onSubmit={(event) => { event.preventDefault(); void onLogin(email, password); }}><label>Correu autoritzat<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required placeholder="entrenador@hcsentmenat.cat" /></label><label>Contrasenya<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>{error && <p className="error" role="alert">{error}</p>}<button disabled={loading}>{loading ? "Validant…" : "Entrar"}</button></form><small>Accés privat per a entrenadors i coordinació.</small></section></main>;
+  return <main className="login"><section className="login-card"><img className="club-logo" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1><p className="intro">Planifica, registra i acompanya l'evolució del teu equip.</p><form onSubmit={(event) => { event.preventDefault(); void onLogin(email, password); }}><label>Correu autoritzat<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required placeholder="entrenador@hcsentmenat.cat" /></label><label>Contrasenya<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>{error && <p className="error" role="alert">{error}</p>}<button disabled={loading}>{loading ? "Validant…" : "Entrar"}</button>{onPasskeyLogin && <button type="button" className="quiet" disabled={loading || !email} onClick={() => void onPasskeyLogin(email)}>Usa Face ID / empremta</button>}</form><small>Accés privat per a entrenadors i coordinació.</small></section></main>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
