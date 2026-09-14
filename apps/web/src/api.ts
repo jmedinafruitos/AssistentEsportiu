@@ -10,14 +10,67 @@ export type CurrentUser = {
   sport_role: string | null; global_access: boolean; teams: Team[];
 };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
+// Training's shape matches docs/ficha-entreno-schema.md (JME-42); match is
+// unchanged from JME-10. Activation fields are per-phase free text, not
+// booleans — see that doc for why.
+export type TrainingActivation = {
+  prevencion?: string; activacionPorteros?: string; activacionJugadores?: string; integrado?: string; participativo?: string;
+};
+export type TrainingBlockInput = { description: string; diagramAssetUrl?: string; exerciseId?: string };
+export type TrainingBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null };
+export type RecordInput =
+  | { type: "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }
+  | { type: "training"; happenedAt: string; sessionNumber?: number; coach?: string; notes?: string; activation?: TrainingActivation; blocks: TrainingBlockInput[] };
 export type TeamRecord = {
   id: string; record_type: "training" | "match"; happened_at: string;
-  content: { summary: string; outcome?: string | null; nextObjectives?: string[] };
+  content:
+    | { summary: string; outcome?: string | null; nextObjectives?: string[] }
+    | { sessionNumber: number | null; coach: string | null; notes: string | null; activation: TrainingActivation; blocks: TrainingBlock[] };
   created_at: string; created_by_name?: string;
+};
+// JME-44: AI-assisted training-session preparation. Step order mirrors
+// apps/api/src/training-preparation.ts's deriveSteps exactly — 5 fixed
+// activation phases, then one entry per draft block, then "review".
+export const ACTIVATION_PHASES = ["prevencion", "activacionPorteros", "activacionJugadores", "integrado", "participativo"] as const;
+export type ActivationPhase = (typeof ACTIVATION_PHASES)[number];
+export const ACTIVATION_LABELS: Record<ActivationPhase, string> = {
+  prevencion: "Prevenció", activacionPorteros: "Activació porters", activacionJugadores: "Activació jugadors",
+  integrado: "Integrat", participativo: "Participatiu",
+};
+export type PreparationStep = { kind: "activation"; phase: ActivationPhase } | { kind: "block"; index: number } | { kind: "review" };
+export function derivePreparationSteps(content: PreparationContent): PreparationStep[] {
+  return [
+    ...ACTIVATION_PHASES.map((phase): PreparationStep => ({ kind: "activation", phase })),
+    ...content.blocks.map((_, index): PreparationStep => ({ kind: "block", index })),
+    { kind: "review" },
+  ];
+}
+export type PreparationBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null };
+export type PreparationContent = {
+  sessionNumber: number | null; coach: string | null; notes: string | null;
+  activation: Record<ActivationPhase, string>;
+  blocks: PreparationBlock[];
+};
+export type TrainingPreparation = { id: string; status: "drafting" | "ready" | "sent"; draft_content: PreparationContent; current_step: number };
+export type RefineAction =
+  | { action: "approve" }
+  | { action: "back" }
+  | { action: "feedback"; instruction: string }
+  | { action: "swap_exercise"; exerciseId: string | null }
+  | { action: "edit"; value: string };
+
+export type Exercise = {
+  id: string; name: string; type: "juego" | "circuito" | "ejercicio" | "tactica"; description: string | null;
+  variants: string[]; tags: string[]; source_document_id: string | null; page_ref: string | null; created_at: string;
 };
 export type CoordinatorOverview = {
   teams: Array<Team & { staff_count: number; record_count: number; last_activity_at: string | null }>;
-  pendingProposals: Array<{ id: string; reason: string; proposed_at: string; proposed_by_name: string }>;
+  pendingProposals: Array<{
+    id: string; reason: string; proposed_at: string; proposed_by_name: string;
+    source_document_id: string | null; source_document_title: string | null;
+    source_document_layer: "principios" | "estructura" | "recursos" | null;
+    source_document_drive_url: string | null; source_document_summary: string | null;
+  }>;
 };
 export type TeamPlan = { id: string; season: string; version: number; content: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string } };
 export type AssistantResult = { id: string; user_message: string; assistant_message: string; created_at: string; requested_by: string };
@@ -40,9 +93,13 @@ export type EventTypeActionTemplate = {
 export type FecapaSyncSummary = { leagues: number; matchesSeen: number; eventsCreated: number; eventsUpdated: number };
 
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
+  // Only set content-type when there's actually a body — Fastify's default
+  // JSON parser rejects a request with this header but no body outright
+  // (FST_ERR_CTP_EMPTY_JSON_BODY), which silently 400'd every no-body POST
+  // (syncFecapa, and now startPreparation/finalizePreparation/sendPreparation).
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
-    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}), ...options.headers },
+    headers: { ...(options.body ? { "content-type": "application/json" } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}), ...options.headers },
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { message?: string };
@@ -69,8 +126,28 @@ export const api = {
       body: JSON.stringify({ teamId, message, history: history.slice(-10).map(({ role, content }) => ({ role, content })) }),
     }, token),
   records: (token: string, teamId: string) => request<{ records: TeamRecord[] }>(`/v1/teams/${teamId}/records`, {}, token),
-  createRecord: (token: string, teamId: string, record: { type: "training" | "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }) =>
+  createRecord: (token: string, teamId: string, record: RecordInput) =>
     request<TeamRecord>(`/v1/teams/${teamId}/records`, { method: "POST", body: JSON.stringify(record) }, token),
+  exercises: (token: string) => request<{ exercises: Exercise[] }>("/v1/exercises", {}, token),
+  getPreparation: (token: string, teamId: string, eventId: string) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation`, {}, token),
+  startPreparation: (token: string, teamId: string, eventId: string) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation`, { method: "POST" }, token),
+  updatePreparationHeader: (token: string, teamId: string, eventId: string, header: { sessionNumber?: number | null; coach?: string | null; notes?: string | null }) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation/header`, { method: "PATCH", body: JSON.stringify(header) }, token),
+  refinePreparationStep: (token: string, teamId: string, eventId: string, step: number, action: RefineAction) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation/steps/${step}`, { method: "POST", body: JSON.stringify(action) }, token),
+  finalizePreparation: (token: string, teamId: string, eventId: string) =>
+    request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation/finalize`, { method: "POST" }, token),
+  previewPreparationPdf: async (token: string, teamId: string, eventId: string): Promise<Blob> => {
+    const response = await fetch(`${API_URL}/v1/teams/${teamId}/events/${eventId}/preparation/pdf`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.blob();
+  },
+  sendPreparation: (token: string, teamId: string, eventId: string) =>
+    request<{ id: string; status: string; sent_at: string; recipients: string[] }>(`/v1/teams/${teamId}/events/${eventId}/preparation/send`, { method: "POST" }, token),
   coordinatorOverview: (token: string) => request<CoordinatorOverview>("/v1/coordinator/overview", {}, token),
   plan: (token: string, teamId: string) => request<{ plan: TeamPlan | null }>(`/v1/teams/${teamId}/plan`, {}, token),
   savePlan: (token: string, teamId: string, plan: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string; version?: number }) => request<TeamPlan>(`/v1/teams/${teamId}/plan`, { method: "PUT", body: JSON.stringify(plan) }, token),

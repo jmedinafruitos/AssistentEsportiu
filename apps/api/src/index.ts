@@ -17,6 +17,28 @@ import {
 import { z } from "zod";
 import { ConfigurableAiService } from "./ai.js";
 import { hasEventAccess, hasTeamAccess, isGlobalAccess, teamAccessCategory } from "./authorization.js";
+import { driveConfigured, syncDriveDocuments } from "./drive.js";
+import { extractPendingDocuments } from "./extraction.js";
+import { suggestExercisesFromSummary } from "./exercise-suggestions.js";
+import { syncEventToCalendar } from "./google-calendar.js";
+import { emailConfigured, sendEmail } from "./resend.js";
+import {
+  applyManualEdit,
+  buildEmailHtml,
+  buildEmailSubject,
+  buildTrainingContext,
+  draftInitialContent,
+  refineSection,
+  resolveExerciseNames,
+  resolveRecipients,
+  resolveStep,
+  swapExercise,
+  totalSteps,
+  TrainingContent,
+  trainingContentSchema,
+} from "./training-preparation.js";
+import { generateTrainingPdf } from "./training-preparation-pdf.js";
+import { generateStrategyProposals } from "./strategy-proposals.js";
 import { materializeEventActions } from "./events.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } from "./training-series.js";
@@ -41,6 +63,12 @@ const env = z.object({
   AI_BASE_URL: z.string().url().default("https://api.openai.com/v1"),
   AI_MODEL: z.string().min(1).default("gpt-5-mini"),
   WEB_ORIGIN: z.string().url().optional(),
+  GOOGLE_SERVICE_ACCOUNT_EMAIL: z.string().email().optional(),
+  GOOGLE_SERVICE_ACCOUNT_KEY: z.string().min(1).optional(),
+  DRIVE_FOLDER_ID: z.string().min(1).optional(),
+  GOOGLE_CALENDAR_ID: z.string().min(1).optional(),
+  RESEND_API_KEY: z.string().min(1).optional(),
+  RESEND_FROM_EMAIL: z.string().email().optional(),
 }).parse(process.env);
 
 const app = Fastify({ logger: true });
@@ -54,6 +82,19 @@ const ai = new ConfigurableAiService({
   baseUrl: env.AI_BASE_URL,
   model: env.AI_MODEL,
 });
+const driveConfig = {
+  serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  serviceAccountKey: env.GOOGLE_SERVICE_ACCOUNT_KEY,
+  folderId: env.DRIVE_FOLDER_ID,
+};
+// Same service account as Drive, also shared to the club's Calendar — one
+// credential for the whole app rather than managing two.
+const calendarConfig = {
+  serviceAccountEmail: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  serviceAccountKey: env.GOOGLE_SERVICE_ACCOUNT_KEY,
+  calendarId: env.GOOGLE_CALENDAR_ID,
+};
+const emailConfig = { apiKey: env.RESEND_API_KEY, fromEmail: env.RESEND_FROM_EMAIL };
 
 await app.register(cors, { origin: env.WEB_ORIGIN ?? false });
 await app.register(jwt, { secret: env.JWT_SECRET });
@@ -264,8 +305,11 @@ app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwt
        GROUP BY t.id, c.name ORDER BY t.name`,
     ),
     db.query(
-      `SELECT p.id, p.strategy_context_id, p.base_version, p.reason, p.proposed_at, u.name AS proposed_by_name
+      `SELECT p.id, p.strategy_context_id, p.base_version, p.reason, p.proposed_at, u.name AS proposed_by_name,
+              sd.id AS source_document_id, sd.title AS source_document_title, sd.layer AS source_document_layer,
+              sd.drive_url AS source_document_drive_url, sd.summary AS source_document_summary
        FROM strategy_change_proposals p JOIN users u ON u.id = p.proposed_by
+       LEFT JOIN source_documents sd ON sd.id = p.source_document_id
        WHERE p.status = 'pending' ORDER BY p.proposed_at DESC`,
     ),
   ]);
@@ -275,15 +319,22 @@ app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwt
 app.post("/v1/strategy-contexts/:contextId/proposals", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const { contextId } = z.object({ contextId: z.string().uuid() }).parse(request.params);
-  const body = z.object({ content: z.record(z.unknown()), version: z.number().int().positive(), reason: z.string().trim().min(3).max(1_000) }).parse(request.body);
+  const body = z.object({
+    content: z.record(z.unknown()),
+    version: z.number().int().positive(),
+    reason: z.string().trim().min(3).max(1_000),
+    sourceDocumentId: z.string().uuid().optional(),
+  }).parse(request.body);
   const result = await db.query(
     `INSERT INTO strategy_change_proposals
-       (strategy_context_id, base_version, proposed_content, reason, proposed_by)
-     SELECT sc.id, $3, $4, $5, u.id
+       (strategy_context_id, base_version, proposed_content, reason, proposed_by, source_document_id)
+     SELECT sc.id, $3, $4, $5, u.id, sd.id
      FROM users u JOIN strategy_contexts sc ON sc.id = $2
+     LEFT JOIN source_documents sd ON sd.id = $6::uuid
      WHERE u.id = $1 AND u.active = true AND u.global_access = true AND sc.version = $3
-     RETURNING id, strategy_context_id, base_version, proposed_content, reason, status, proposed_at`,
-    [identity.sub, contextId, body.version, body.content, body.reason],
+       AND ($6::uuid IS NULL OR sd.id IS NOT NULL)
+     RETURNING id, strategy_context_id, base_version, proposed_content, reason, status, proposed_at, source_document_id`,
+    [identity.sub, contextId, body.version, body.content, body.reason, body.sourceDocumentId ?? null],
   );
   if (!result.rowCount) return reply.code(409).send({ message: "Forbidden or strategy context has changed" });
   return reply.code(201).send(result.rows[0]);
@@ -346,16 +397,59 @@ app.get("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jw
   return { records: result.rows };
 });
 
-app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
-  const identity = request.user as { sub: string };
-  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
-  const body = z.object({
-    type: z.enum(["training", "match"]),
+// Training's content contract is documented in docs/ficha-entreno-schema.md
+// (JME-42) — a fixed structure matching the paper "Ficha entreno" template,
+// as opposed to match's freeform summary/outcome/nextObjectives (JME-10,
+// unchanged). "Activación" fields are per-phase descriptions in the paper
+// template, not booleans, so each is optional free text.
+const trainingBlockSchema = z.object({
+  description: z.string().trim().min(1).max(1_000),
+  diagramAssetUrl: z.string().trim().url().optional(),
+  exerciseId: z.string().uuid().optional(),
+});
+const recordBodySchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("match"),
     happenedAt: z.string().datetime(),
     summary: z.string().trim().min(1).max(2_000),
     outcome: z.string().trim().max(500).optional(),
     nextObjectives: z.array(z.string().trim().min(1).max(300)).max(10).default([]),
-  }).parse(request.body);
+  }),
+  z.object({
+    type: z.literal("training"),
+    happenedAt: z.string().datetime(),
+    sessionNumber: z.number().int().positive().optional(),
+    coach: z.string().trim().min(1).max(200).optional(),
+    notes: z.string().trim().max(2_000).optional(),
+    activation: z.object({
+      prevencion: z.string().trim().max(500).optional(),
+      activacionPorteros: z.string().trim().max(500).optional(),
+      activacionJugadores: z.string().trim().max(500).optional(),
+      integrado: z.string().trim().max(500).optional(),
+      participativo: z.string().trim().max(500).optional(),
+    }).default({}),
+    blocks: z.array(trainingBlockSchema).min(1).max(3),
+  }),
+]);
+
+app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const body = recordBodySchema.parse(request.body);
+  const content = body.type === "match"
+    ? { summary: body.summary, outcome: body.outcome ?? null, nextObjectives: body.nextObjectives }
+    : {
+        sessionNumber: body.sessionNumber ?? null,
+        coach: body.coach ?? null,
+        notes: body.notes ?? null,
+        activation: body.activation,
+        blocks: body.blocks.map((block, orderIndex) => ({
+          orderIndex,
+          description: block.description,
+          diagramAssetUrl: block.diagramAssetUrl ?? null,
+          exerciseId: block.exerciseId ?? null,
+        })),
+      };
   const result = await db.query(
     `INSERT INTO team_records (team_id, record_type, happened_at, content, created_by)
      SELECT t.id, $3, $4, $5, u.id
@@ -363,9 +457,7 @@ app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.j
      WHERE u.id = $1 AND u.active = true
        AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = t.id))
      RETURNING id, record_type, happened_at, content, created_at`,
-    [identity.sub, teamId, body.type, body.happenedAt, {
-      summary: body.summary, outcome: body.outcome ?? null, nextObjectives: body.nextObjectives,
-    }],
+    [identity.sub, teamId, body.type, body.happenedAt, content],
   );
   if (!result.rowCount) return reply.code(403).send({ message: "Forbidden" });
   return reply.code(201).send(result.rows[0]);
@@ -473,6 +565,13 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
     const created = event.rows[0];
     const actions = await materializeEventActions(client, created.id, teamId, categoryId, body.eventType);
     await client.query("COMMIT");
+    // Fired after commit, not awaited: Calendar's latency shouldn't hold up
+    // the response, and a failure here must not undo an event Postgres
+    // already has (Postgres is the source of truth — JME-30).
+    void syncEventToCalendar(db, calendarConfig, {
+      id: created.id, title: created.title, startsAt: created.starts_at, endsAt: created.ends_at,
+      location: created.location, notes: created.notes, canceled: created.canceled, googleCalendarEventId: null,
+    }).catch((error) => request.log.error({ err: error, eventId: created.id }, "Calendar sync failed"));
     return reply.code(201).send({ event: created, actions });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -709,7 +808,7 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
          updated_at = now()
      WHERE id = $1 AND team_id = $2
      RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at,
-               training_series_id, overridden`,
+               training_series_id, overridden, google_calendar_event_id`,
     [
       eventId, teamId,
       body.title ?? null,
@@ -721,7 +820,14 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
     ],
   );
   if (!result.rowCount) return reply.code(404).send({ message: "Event not found" });
-  return result.rows[0];
+  const updated = result.rows[0];
+  // Same fire-and-forget, best-effort stance as on creation (JME-30).
+  void syncEventToCalendar(db, calendarConfig, {
+    id: updated.id, title: updated.title, startsAt: updated.starts_at, endsAt: updated.ends_at,
+    location: updated.location, notes: updated.notes, canceled: updated.canceled,
+    googleCalendarEventId: updated.google_calendar_event_id,
+  }).catch((error) => request.log.error({ err: error, eventId: updated.id }, "Calendar sync failed"));
+  return updated;
 });
 
 app.post("/v1/teams/:teamId/events/:eventId/actions", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
@@ -868,6 +974,368 @@ app.patch("/v1/event-type-actions/:actionId", { onRequest: [async (request) => r
   if (!result.rowCount) return reply.code(404).send({ message: "Action template not found" });
   return result.rows[0];
 });
+
+app.get("/v1/exercises", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
+  const query = z.object({
+    tag: z.string().trim().min(1).optional(),
+    type: z.enum(["juego", "circuito", "ejercicio", "tactica"]).optional(),
+  }).parse(request.query);
+  const result = await db.query(
+    `SELECT id, name, type, description, variants, tags, source_document_id, page_ref, created_at
+     FROM exercises
+     WHERE ($1::text IS NULL OR tags @> ARRAY[$1::text])
+       AND ($2::text IS NULL OR type = $2)
+     ORDER BY name`,
+    [query.tag ?? null, query.type ?? null],
+  );
+  return { exercises: result.rows };
+});
+
+app.post("/v1/exercises", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  const body = z.object({
+    name: z.string().trim().min(1).max(200),
+    type: z.enum(["juego", "circuito", "ejercicio", "tactica"]),
+    description: z.string().trim().max(4_000).optional(),
+    variants: z.array(z.string().trim().min(1).max(300)).max(20).default([]),
+    tags: z.array(z.string().trim().min(1).max(60)).max(20).default([]),
+    sourceDocumentId: z.string().uuid().optional(),
+    pageRef: z.string().trim().max(50).optional(),
+  }).parse(request.body);
+  const result = await db.query(
+    `INSERT INTO exercises (name, type, description, variants, tags, source_document_id, page_ref, created_by)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id, name, type, description, variants, tags, source_document_id, page_ref, created_at`,
+    [body.name, body.type, body.description ?? null, body.variants, body.tags, body.sourceDocumentId ?? null, body.pageRef ?? null, identity.sub],
+  );
+  return reply.code(201).send(result.rows[0]);
+});
+
+app.patch("/v1/exercises/:exerciseId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  const { exerciseId } = z.object({ exerciseId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    name: z.string().trim().min(1).max(200).optional(),
+    type: z.enum(["juego", "circuito", "ejercicio", "tactica"]).optional(),
+    description: z.string().trim().max(4_000).nullable().optional(),
+    variants: z.array(z.string().trim().min(1).max(300)).max(20).optional(),
+    tags: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
+  }).parse(request.body);
+  const result = await db.query(
+    `UPDATE exercises
+     SET name = COALESCE($2, name),
+         type = COALESCE($3, type),
+         description = CASE WHEN $4::boolean THEN $5 ELSE description END,
+         variants = COALESCE($6::text[], variants),
+         tags = COALESCE($7::text[], tags)
+     WHERE id = $1
+     RETURNING id, name, type, description, variants, tags, source_document_id, page_ref, created_at`,
+    [exerciseId, body.name ?? null, body.type ?? null, "description" in body, body.description ?? null, body.variants ?? null, body.tags ?? null],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "Exercise not found" });
+  return result.rows[0];
+});
+
+app.post("/v1/exercises/suggest", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  if (!ai.configured) return reply.code(503).send({ message: "AI service is not configured" });
+  const body = z.object({ sourceDocumentId: z.string().uuid() }).parse(request.body);
+  const document = await db.query(
+    `SELECT title, summary FROM source_documents WHERE id = $1 AND summary IS NOT NULL`,
+    [body.sourceDocumentId],
+  );
+  if (!document.rowCount) return reply.code(404).send({ message: "Document not found or not yet summarized" });
+  const { title, summary } = document.rows[0] as { title: string; summary: string };
+  try {
+    const exercises = await suggestExercisesFromSummary(ai, title, summary);
+    return { exercises };
+  } catch (error) {
+    request.log.error({ err: error }, "Exercise suggestion failed");
+    return reply.code(502).send({ message: "Exercise suggestion failed" });
+  }
+});
+
+// JME-44: AI-assisted training-session preparation, reviewed one
+// phase/exercise at a time. Draft shape and step order live in
+// training-preparation.ts; these routes are thin request/DB glue.
+app.post("/v1/teams/:teamId/events/:eventId/preparation", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+  const existing = await db.query(
+    `SELECT id, status, draft_content, current_step FROM training_preparations WHERE team_event_id = $1`,
+    [eventId],
+  );
+  if (existing.rowCount) return existing.rows[0];
+
+  const event = await db.query(`SELECT event_type FROM team_events WHERE id = $1 AND team_id = $2`, [eventId, teamId]);
+  if (!event.rowCount) return reply.code(404).send({ message: "Event not found" });
+  if ((event.rows[0] as { event_type: string }).event_type !== "training") {
+    return reply.code(400).send({ message: "Preparation is only available for training events" });
+  }
+  if (!ai.configured) return reply.code(503).send({ message: "AI service is not configured" });
+
+  try {
+    const context = await buildTrainingContext(db, teamId, eventId);
+    const draft = await draftInitialContent(ai, context);
+    const created = await db.query(
+      `INSERT INTO training_preparations (team_event_id, team_id, draft_content, created_by)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, status, draft_content, current_step`,
+      [eventId, teamId, draft, identity.sub],
+    );
+    return reply.code(201).send(created.rows[0]);
+  } catch (error) {
+    request.log.error({ err: error, eventId }, "Training preparation draft failed");
+    return reply.code(502).send({ message: "Could not draft the training preparation" });
+  }
+});
+
+app.get("/v1/teams/:teamId/events/:eventId/preparation", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT id, status, draft_content, current_step FROM training_preparations WHERE team_event_id = $1`,
+    [eventId],
+  );
+  if (!result.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+  return result.rows[0];
+});
+
+// Header fields (sessionNumber/coach/notes) sit outside the phase/block step
+// sequence — edited inline, always visible, per JME-44's design.
+app.patch(
+  "/v1/teams/:teamId/events/:eventId/preparation/header",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+    const body = z.object({
+      sessionNumber: z.number().int().positive().nullable().optional(),
+      coach: z.string().trim().max(200).nullable().optional(),
+      notes: z.string().trim().max(2_000).nullable().optional(),
+    }).parse(request.body);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+    const existing = await db.query(
+      `SELECT id, status, draft_content FROM training_preparations WHERE team_event_id = $1`,
+      [eventId],
+    );
+    if (!existing.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+    const row = existing.rows[0] as { id: string; status: string; draft_content: TrainingContent };
+    if (row.status !== "drafting") return reply.code(409).send({ message: "Preparation is no longer editable" });
+
+    const content = trainingContentSchema.parse(row.draft_content);
+    const updatedContent: TrainingContent = {
+      ...content,
+      sessionNumber: "sessionNumber" in body ? body.sessionNumber ?? null : content.sessionNumber,
+      coach: "coach" in body ? body.coach ?? null : content.coach,
+      notes: "notes" in body ? body.notes ?? null : content.notes,
+    };
+    const updated = await db.query(
+      `UPDATE training_preparations SET draft_content = $2, updated_at = now() WHERE id = $1
+       RETURNING id, status, draft_content, current_step`,
+      [row.id, updatedContent],
+    );
+    return updated.rows[0];
+  },
+);
+
+const refineActionSchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("approve") }),
+  z.object({ action: z.literal("back") }),
+  z.object({ action: z.literal("feedback"), instruction: z.string().trim().min(1).max(1_000) }),
+  z.object({ action: z.literal("swap_exercise"), exerciseId: z.string().uuid().nullable() }),
+  z.object({ action: z.literal("edit"), value: z.string().trim().max(1_000) }),
+]);
+
+app.post(
+  "/v1/teams/:teamId/events/:eventId/preparation/steps/:step",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId, step: stepParam } = z
+      .object({ teamId: z.string().uuid(), eventId: z.string().uuid(), step: z.coerce.number().int().min(0) })
+      .parse(request.params);
+    const body = refineActionSchema.parse(request.body);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await client.query(
+        `SELECT id, status, draft_content, current_step FROM training_preparations WHERE team_event_id = $1 FOR UPDATE`,
+        [eventId],
+      );
+      if (!existing.rowCount) {
+        await client.query("ROLLBACK");
+        return reply.code(404).send({ message: "No preparation yet" });
+      }
+      const row = existing.rows[0] as { id: string; status: string; draft_content: TrainingContent; current_step: number };
+      if (row.status !== "drafting") {
+        await client.query("ROLLBACK");
+        return reply.code(409).send({ message: "Preparation is no longer editable" });
+      }
+
+      let content = trainingContentSchema.parse(row.draft_content);
+      const step = resolveStep(content, stepParam);
+      let currentStep = row.current_step;
+
+      if (body.action === "approve") {
+        currentStep = Math.min(currentStep + 1, totalSteps(content) - 1);
+      } else if (body.action === "back") {
+        currentStep = Math.max(currentStep - 1, 0);
+      } else if (body.action === "feedback") {
+        const context = await buildTrainingContext(db, teamId, eventId);
+        content = await refineSection(ai, content, step, body.instruction, context.candidateExercises);
+      } else if (body.action === "swap_exercise") {
+        content = swapExercise(content, step, body.exerciseId);
+      } else {
+        content = applyManualEdit(content, step, body.value);
+      }
+
+      const updated = await client.query(
+        `UPDATE training_preparations SET draft_content = $2, current_step = $3, updated_at = now()
+         WHERE id = $1 RETURNING id, status, draft_content, current_step`,
+        [row.id, content, currentStep],
+      );
+      await client.query("COMMIT");
+      return updated.rows[0];
+    } catch (error) {
+      await client.query("ROLLBACK");
+      const message = error instanceof Error ? error.message : "";
+      if (message === "AI_NOT_CONFIGURED") return reply.code(503).send({ message: "AI service is not configured" });
+      if (["STEP_OUT_OF_RANGE", "REVIEW_STEP_HAS_NO_CONTENT", "SWAP_ONLY_VALID_FOR_BLOCKS"].includes(message)) {
+        return reply.code(400).send({ message });
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  },
+);
+
+app.post(
+  "/v1/teams/:teamId/events/:eventId/preparation/finalize",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+    const existing = await db.query(
+      `SELECT id, status, draft_content, current_step FROM training_preparations WHERE team_event_id = $1`,
+      [eventId],
+    );
+    if (!existing.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+    const row = existing.rows[0] as { id: string; status: string; draft_content: TrainingContent; current_step: number };
+    if (row.status !== "drafting") return reply.code(409).send({ message: "Already finalized" });
+    const content = trainingContentSchema.parse(row.draft_content);
+    if (row.current_step !== totalSteps(content) - 1) {
+      return reply.code(409).send({ message: "Every phase and block must be approved first" });
+    }
+    const updated = await db.query(
+      `UPDATE training_preparations SET status = 'ready', updated_at = now() WHERE id = $1
+       RETURNING id, status, draft_content, current_step`,
+      [row.id],
+    );
+    return updated.rows[0];
+  },
+);
+
+app.get(
+  "/v1/teams/:teamId/events/:eventId/preparation/pdf",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+
+    const result = await db.query(
+      `SELECT tp.status, tp.draft_content, t.name AS team_name, te.starts_at
+       FROM training_preparations tp
+       JOIN teams t ON t.id = tp.team_id
+       JOIN team_events te ON te.id = tp.team_event_id
+       WHERE tp.team_event_id = $1`,
+      [eventId],
+    );
+    if (!result.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+    const row = result.rows[0] as { status: string; draft_content: TrainingContent; team_name: string; starts_at: string | Date };
+    if (row.status === "drafting") return reply.code(409).send({ message: "Finalize the preparation first" });
+
+    const content = trainingContentSchema.parse(row.draft_content);
+    const exerciseNames = await resolveExerciseNames(db, content.blocks.map((block) => block.exerciseId));
+    const eventDate = new Date(row.starts_at).toISOString().slice(0, 10);
+    const pdf = await generateTrainingPdf(row.team_name, eventDate, content, exerciseNames);
+    reply.header("content-type", "application/pdf");
+    reply.header("content-disposition", `inline; filename="entrenament.pdf"`);
+    return reply.send(pdf);
+  },
+);
+
+app.post(
+  "/v1/teams/:teamId/events/:eventId/preparation/send",
+  { onRequest: [async (request) => request.jwtVerify()] },
+  async (request, reply) => {
+    const identity = request.user as { sub: string };
+    const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+    const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+    if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+    if (!emailConfigured(emailConfig)) return reply.code(503).send({ message: "Email is not configured" });
+
+    const result = await db.query(
+      `SELECT tp.id, tp.status, tp.draft_content, tp.created_by, t.name AS team_name, te.starts_at
+       FROM training_preparations tp
+       JOIN teams t ON t.id = tp.team_id
+       JOIN team_events te ON te.id = tp.team_event_id
+       WHERE tp.team_event_id = $1`,
+      [eventId],
+    );
+    if (!result.rowCount) return reply.code(404).send({ message: "No preparation yet" });
+    const row = result.rows[0] as {
+      id: string; status: string; draft_content: TrainingContent; created_by: string; team_name: string; starts_at: string | Date;
+    };
+    if (row.status !== "ready") return reply.code(409).send({ message: "Finalize the preparation first" });
+
+    const content = trainingContentSchema.parse(row.draft_content);
+    const eventDate = new Date(row.starts_at).toISOString().slice(0, 10);
+    const exerciseNames = await resolveExerciseNames(db, content.blocks.map((block) => block.exerciseId));
+    const pdf = await generateTrainingPdf(row.team_name, eventDate, content, exerciseNames);
+    const recipients = await resolveRecipients(db, teamId, row.created_by);
+
+    try {
+      await sendEmail(emailConfig, {
+        to: recipients,
+        subject: buildEmailSubject(row.team_name, eventDate, content),
+        html: buildEmailHtml(row.team_name, eventDate, content),
+        attachments: [{ filename: "entrenament.pdf", content: pdf, contentType: "application/pdf" }],
+      });
+    } catch (error) {
+      request.log.error({ err: error, eventId }, "Training preparation email failed");
+      return reply.code(502).send({ message: "Could not send the email" });
+    }
+
+    const updated = await db.query(
+      `UPDATE training_preparations SET status = 'sent', sent_at = now() WHERE id = $1 RETURNING id, status, sent_at`,
+      [row.id],
+    );
+    return { ...updated.rows[0], recipients };
+  },
+);
 
 app.post("/v1/chat", {
   onRequest: [async (request) => request.jwtVerify()],
@@ -1156,6 +1624,77 @@ app.post("/v1/fecapa/sync", { onRequest: [async (request) => request.jwtVerify()
     return reply.code(502).send({ message: "FECAPA sync failed" });
   }
 });
+
+app.post("/v1/drive/sync", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  if (!driveConfigured(driveConfig)) return reply.code(503).send({ message: "Drive sync is not configured" });
+  try {
+    return await syncDriveDocuments(db, driveConfig);
+  } catch (error) {
+    request.log.error({ err: error }, "Drive manual sync failed");
+    return reply.code(502).send({ message: "Drive sync failed" });
+  }
+});
+
+app.post("/v1/drive/extract", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  if (!driveConfigured(driveConfig) || !ai.configured) {
+    return reply.code(503).send({ message: "Drive extraction is not configured" });
+  }
+  try {
+    return await extractPendingDocuments(db, driveConfig, ai);
+  } catch (error) {
+    request.log.error({ err: error }, "Drive manual extraction failed");
+    return reply.code(502).send({ message: "Drive extraction failed" });
+  }
+});
+
+app.post("/v1/drive/generate-proposals", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  if (!ai.configured) return reply.code(503).send({ message: "AI service is not configured" });
+  try {
+    return await generateStrategyProposals(db, ai);
+  } catch (error) {
+    request.log.error({ err: error }, "Strategy proposal generation failed");
+    return reply.code(502).send({ message: "Proposal generation failed" });
+  }
+});
+
+// Coordinator keeps editing EstrategiaHCS in Drive as normal; this just
+// polls for changes on a fixed cadence rather than a specific day/time —
+// unlike FECAPA there's no external server to be a considerate guest of, and
+// a simple fixed interval is enough to keep source_documents fresh.
+const DRIVE_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1000;
+function scheduleDriveSync() {
+  if (!driveConfigured(driveConfig)) {
+    app.log.info("Drive sync not configured (service account or DRIVE_FOLDER_ID missing); skipping");
+    return;
+  }
+  setTimeout(() => {
+    void syncDriveDocuments(db, driveConfig)
+      .then((summary) => app.log.info({ summary }, "Drive sync completed"))
+      // Extraction, then proposal generation, run right after sync so a
+      // newly detected document can reach a reviewable proposal in the same
+      // pass — both skipped (not an error) when AI isn't configured,
+      // matching the rest of the app's "AI is optional" stance.
+      .then(() => {
+        if (!ai.configured) return;
+        return extractPendingDocuments(db, driveConfig, ai)
+          .then((summary) => app.log.info({ summary }, "Drive extraction completed"))
+          .then(() => generateStrategyProposals(db, ai))
+          .then((summary) => app.log.info({ summary }, "Strategy proposal generation completed"));
+      })
+      .catch((error) => app.log.error({ err: error }, "Drive scheduled sync/extraction failed"))
+      .finally(() => scheduleDriveSync());
+  }, DRIVE_SYNC_INTERVAL_MS);
+}
+scheduleDriveSync();
 
 // Runs every Monday and Thursday at 03:00 Europe/Madrid (low-traffic hour,
 // avoids hammering FECAPA's server during the day) rather than a fixed
