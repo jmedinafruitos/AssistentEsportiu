@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventTypeActionTemplate, Exercise, RecordInput, RefineAction, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { loginWithPasskey, passkeysAvailable, registerPasskey } from "./webauthn";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
@@ -25,7 +26,11 @@ function App() {
   const [creatingEvent, setCreatingEvent] = useState(false);
   const [managingTemplates, setManagingTemplates] = useState(false);
   const [syncingFecapa, setSyncingFecapa] = useState(false);
+  const [canUsePasskeys, setCanUsePasskeys] = useState(false);
+  const [activatingPasskey, setActivatingPasskey] = useState(false);
   const [preparingEventId, setPreparingEventId] = useState<string | null>(null);
+
+  useEffect(() => { void passkeysAvailable().then(setCanUsePasskeys); }, []);
 
   useEffect(() => {
     if (!token) return;
@@ -65,11 +70,25 @@ function App() {
   const activeTeam = useMemo(() => teams.find((team) => team.id === teamId), [teams, teamId]);
   function logout() { localStorage.removeItem(TOKEN_KEY); setToken(""); setUser(null); setTeams([]); setMessages([]); }
 
+  function applyToken(newToken: string) { localStorage.setItem(TOKEN_KEY, newToken); setToken(newToken); }
+
   async function login(email: string, password: string) {
     setLoading(true); setError("");
-    try {
-      const session = await api.login(email, password); localStorage.setItem(TOKEN_KEY, session.token); setToken(session.token);
-    } catch { setError("Correu o contrasenya incorrectes."); setLoading(false); }
+    try { applyToken((await api.login(email, password)).token); }
+    catch { setError("Correu o contrasenya incorrectes."); setLoading(false); }
+  }
+
+  async function loginWithBiometrics(email: string) {
+    setLoading(true); setError("");
+    try { applyToken(await loginWithPasskey(email)); }
+    catch { setError("No s'ha pogut iniciar sessió amb Face ID / empremta. Prova amb la contrasenya."); setLoading(false); }
+  }
+
+  async function activatePasskey() {
+    setActivatingPasskey(true); setError("");
+    try { await registerPasskey(token, navigator.platform || undefined); setNotice("Login biomètric activat en aquest dispositiu."); }
+    catch { setError("No s'ha pogut activar el login biomètric en aquest dispositiu."); }
+    finally { setActivatingPasskey(false); }
   }
 
   async function send(content: string) {
@@ -88,11 +107,11 @@ function App() {
     } finally { setLoading(false); }
   }
 
-  if (!token || (!user && !loading)) return <Login onLogin={login} loading={loading} error={error} />;
+  if (!token || (!user && !loading)) return <Login onLogin={login} onPasskeyLogin={canUsePasskeys ? loginWithBiometrics : undefined} loading={loading} error={error} />;
   if (!user) return <main className="centered" aria-live="polite">Carregant el teu context…</main>;
 
   return <main className="assistant-shell">
-    <header className="app-header"><div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div><button className="quiet" onClick={logout}>Sortir</button></header>
+    <header className="app-header"><div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div><span className="header-actions">{canUsePasskeys && <button className="quiet" disabled={activatingPasskey} onClick={() => void activatePasskey()}>{activatingPasskey ? "Activant…" : "Activa Face ID / empremta"}</button>}<button className="quiet" onClick={logout}>Sortir</button></span></header>
     <section className="identity-card"><div><strong>{user.name}</strong><span>{user.sport_role ?? user.role}</span>{user.global_access && <button className="text-action" onClick={() => { if (overview) setOverview(null); else void api.coordinatorOverview(token).then(setOverview).catch(() => setError("No s'ha pogut carregar la visió global.")); }}>{overview ? "Tancar visió global" : "Visió global"}</button>}</div><label>Equip actiu<select value={teamId} onChange={(event) => { setTeamId(event.target.value); setMessages([]); setWeekOffset(0); }}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label></section>
     <section className="events">
       <div className="events-header"><h2>Esdeveniments</h2><span><button className="text-action" onClick={() => setCreatingEvent(true)}>Afegir</button>{user.global_access && <button className="text-action" onClick={() => setManagingTemplates(true)}>Accions per tipus</button>}{user.global_access && <button className="text-action" disabled={syncingFecapa} onClick={() => void syncFecapa()}>{syncingFecapa ? "Sincronitzant…" : "Sincronitzar FECAPA"}</button>}</span></div>
@@ -521,10 +540,10 @@ function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamN
     {error && <p className="error">{error}</p>}<div className="dialog-actions"><button type="button" className="quiet" onClick={onCancel}>Cancel·lar</button><button disabled={saving}>{saving ? "Desant…" : "Desar"}</button></div></form></section></div>;
 }
 
-function Login({ onLogin, loading, error }: { onLogin: (email: string, password: string) => Promise<void>; loading: boolean; error: string }) {
+function Login({ onLogin, onPasskeyLogin, loading, error }: { onLogin: (email: string, password: string) => Promise<void>; onPasskeyLogin?: (email: string) => Promise<void>; loading: boolean; error: string }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  return <main className="login"><section className="login-card"><img className="club-logo" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1><p className="intro">Planifica, registra i acompanya l'evolució del teu equip.</p><form onSubmit={(event) => { event.preventDefault(); void onLogin(email, password); }}><label>Correu autoritzat<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required placeholder="entrenador@hcsentmenat.cat" /></label><label>Contrasenya<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>{error && <p className="error" role="alert">{error}</p>}<button disabled={loading}>{loading ? "Validant…" : "Entrar"}</button></form><small>Accés privat per a entrenadors i coordinació.</small></section></main>;
+  return <main className="login"><section className="login-card"><img className="club-logo" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1><p className="intro">Planifica, registra i acompanya l'evolució del teu equip.</p><form onSubmit={(event) => { event.preventDefault(); void onLogin(email, password); }}><label>Correu autoritzat<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required placeholder="entrenador@hcsentmenat.cat" /></label><label>Contrasenya<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>{error && <p className="error" role="alert">{error}</p>}<button disabled={loading}>{loading ? "Validant…" : "Entrar"}</button>{onPasskeyLogin && <button type="button" className="quiet" disabled={loading || !email} onClick={() => void onPasskeyLogin(email)}>Usa Face ID / empremta</button>}</form><small>Accés privat per a entrenadors i coordinació.</small></section></main>;
 }
 
 function Composer({ disabled, onSend }: { disabled: boolean; onSend: (message: string) => Promise<void> }) {
