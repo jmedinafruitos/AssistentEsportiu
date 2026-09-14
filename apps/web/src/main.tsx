@@ -1,24 +1,21 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, AssistantResult, ChatMessage, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, RecordInput, RefineAction, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, RecordInput, RefineAction, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
-const suggestions = ["Prepara el pròxim entrenament", "Analitza el darrer partit", "Quins objectius prioritzem?"];
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [teams, setTeams] = useState<Team[]>([]);
   const [teamId, setTeamId] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(Boolean(token));
   const [error, setError] = useState("");
   const [recording, setRecording] = useState(false);
   const [notice, setNotice] = useState("");
   const [overview, setOverview] = useState<CoordinatorOverview | null>(null);
   const [planning, setPlanning] = useState(false);
-  const [results, setResults] = useState<AssistantResult[] | null>(null);
   const [events, setEvents] = useState<TeamEvent[]>([]);
   const [weekOffset, setWeekOffset] = useState(0);
   const [selectedEvent, setSelectedEvent] = useState<{ event: TeamEvent; actions: EventAction[] } | null>(null);
@@ -26,6 +23,7 @@ function App() {
   const [managingTemplates, setManagingTemplates] = useState(false);
   const [syncingFecapa, setSyncingFecapa] = useState(false);
   const [preparingEventId, setPreparingEventId] = useState<string | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
 
   useEffect(() => {
     if (!token) return;
@@ -63,7 +61,7 @@ function App() {
   }
 
   const activeTeam = useMemo(() => teams.find((team) => team.id === teamId), [teams, teamId]);
-  function logout() { localStorage.removeItem(TOKEN_KEY); setToken(""); setUser(null); setTeams([]); setMessages([]); }
+  function logout() { localStorage.removeItem(TOKEN_KEY); setToken(""); setUser(null); setTeams([]); }
 
   async function login(email: string, password: string) {
     setLoading(true); setError("");
@@ -72,30 +70,17 @@ function App() {
     } catch { setError("Correu o contrasenya incorrectes."); setLoading(false); }
   }
 
-  async function send(content: string) {
-    const clean = content.trim();
-    if (!clean || !teamId || loading) return;
-    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: clean };
-    const history = messages;
-    setMessages((current) => [...current, userMessage]); setLoading(true); setError("");
-    try {
-      const response = await api.chat(token, teamId, clean, history);
-      setMessages((current) => [...current, { id: response.id, role: "assistant", content: response.content }]);
-    } catch (requestError) {
-      setError(requestError instanceof Error && requestError.message.includes("not configured")
-        ? "L'assistent d'IA encara no està configurat al servidor."
-        : "No s'ha pogut obtenir resposta. Torna-ho a provar d'aquí a un moment.");
-    } finally { setLoading(false); }
-  }
-
   if (!token || (!user && !loading)) return <Login onLogin={login} loading={loading} error={error} />;
   if (!user) return <main className="centered" aria-live="polite">Carregant el teu context…</main>;
 
   return <main className="assistant-shell">
-    <header className="app-header"><div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div><button className="quiet" onClick={logout}>Sortir</button></header>
-    <section className="identity-card"><div><strong>{user.name}</strong><span>{user.sport_role ?? user.role}</span>{user.global_access && <button className="text-action" onClick={() => { if (overview) setOverview(null); else void api.coordinatorOverview(token).then(setOverview).catch(() => setError("No s'ha pogut carregar la visió global.")); }}>{overview ? "Tancar visió global" : "Visió global"}</button>}</div><label>Equip actiu<select value={teamId} onChange={(event) => { setTeamId(event.target.value); setMessages([]); setWeekOffset(0); }}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label></section>
+    <header className="app-header">
+      <div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div>
+      <button type="button" className="menu-btn" aria-label="Menú" onClick={() => setMenuOpen(true)}><svg width="18" height="14" viewBox="0 0 18 14" fill="none" stroke="#173b6d" strokeWidth="2" strokeLinecap="round"><path d="M1 1h16M1 7h16M1 13h16" /></svg></button>
+    </header>
+    {activeTeam && <p className="team-pill-row"><span className="team-pill">{activeTeam.name} · {activeTeam.season}</span></p>}
     <section className="events">
-      <div className="events-header"><h2>Esdeveniments</h2><span><button className="text-action" onClick={() => setCreatingEvent(true)}>Afegir</button>{user.global_access && <button className="text-action" onClick={() => setManagingTemplates(true)}>Accions per tipus</button>}{user.global_access && <button className="text-action" disabled={syncingFecapa} onClick={() => void syncFecapa()}>{syncingFecapa ? "Sincronitzant…" : "Sincronitzar FECAPA"}</button>}</span></div>
+      <div className="events-header"><h2>Esdeveniments</h2></div>
       <div className="week-nav"><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current - 1)} aria-label="Setmana anterior">‹</button><span>{week.label}</span><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current + 1)} aria-label="Setmana següent">›</button></div>
       {events.length
         ? <ul className="event-list">{events.map((event) => {
@@ -105,13 +90,22 @@ function App() {
         : <p className="empty">Sense esdeveniments aquesta setmana.</p>}
     </section>
     {overview && <CoordinatorPanel overview={overview} />}
-    <section className="conversation" aria-live="polite">
-      {!messages.length && <div className="welcome"><span className="eyebrow">{activeTeam?.category ?? "El teu equip"}</span><h2>Què vols treballar avui?</h2><p>Conversarem amb l'estratègia del club i el context autoritzat de {activeTeam?.name}.</p></div>}
-      {messages.map((message) => <article key={message.id} className={`bubble ${message.role}`}><span>{message.role === "assistant" ? "Assistent" : user.name}</span><p>{message.content}</p>{message.role === "assistant" && <button className="speak" onClick={() => speak(message.content)} aria-label="Escoltar resposta">Escoltar</button>}</article>)}
-      {loading && <div className="typing" aria-label="L'assistent està escrivint"><i /><i /><i /></div>}
-    </section>
-    {!messages.length && <nav className="suggestions" aria-label="Suggeriments">{suggestions.map((item) => <button key={item} onClick={() => send(item)}>{item}</button>)}<button onClick={() => setRecording(true)}>Registrar activitat</button><button onClick={() => setPlanning(true)}>Planificació</button><button onClick={() => { if (results) setResults(null); else void api.assistantResults(token, teamId).then(({ results: history }) => setResults(history)); }}>Resultats desats</button></nav>}
-    {results && <section className="result-list"><h2>Resultats de l'assistent</h2>{results.length ? results.map((result) => <article key={result.id}><small>{new Date(result.created_at).toLocaleDateString("ca")} · {result.requested_by}</small><strong>{result.user_message}</strong><p>{result.assistant_message}</p><button className="speak" onClick={() => speak(result.assistant_message)}>Escoltar</button></article>) : <p>Encara no hi ha resultats desats.</p>}</section>}
+    {menuOpen && <HamburgerMenu
+      user={user} teams={teams} teamId={teamId} syncingFecapa={syncingFecapa}
+      onClose={() => setMenuOpen(false)}
+      onSelectTeam={(id) => { setTeamId(id); setWeekOffset(0); setMenuOpen(false); }}
+      onAddEvent={() => { setCreatingEvent(true); setMenuOpen(false); }}
+      onRecordActivity={() => { setRecording(true); setMenuOpen(false); }}
+      onPlanning={() => { setPlanning(true); setMenuOpen(false); }}
+      onManageTemplates={() => { setManagingTemplates(true); setMenuOpen(false); }}
+      onSyncFecapa={() => { setMenuOpen(false); void syncFecapa(); }}
+      onShowOverview={() => {
+        setMenuOpen(false);
+        if (overview) setOverview(null);
+        else void api.coordinatorOverview(token).then(setOverview).catch(() => setError("No s'ha pogut carregar la visió global."));
+      }}
+      onLogout={() => { setMenuOpen(false); logout(); }}
+    />}
     {recording && <RecordCapture teamName={activeTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, teamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
     {planning && <PlanningEditor token={token} teamId={teamId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
     {selectedEvent && <EventDetail token={token} teamId={teamId} detail={selectedEvent} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />}
@@ -120,11 +114,38 @@ function App() {
     {preparingEventId && <TrainingPreparationModal token={token} teamId={teamId} eventId={preparingEventId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPreparingEventId(null)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
-    <Composer disabled={!teamId || loading} onSend={send} />
   </main>;
 }
 
-function speak(content: string) { if (!("speechSynthesis" in window)) return; window.speechSynthesis.cancel(); const utterance = new SpeechSynthesisUtterance(content); utterance.lang = "ca-ES"; window.speechSynthesis.speak(utterance); }
+// JME-46: secondary/occasional actions live here now instead of scattered
+// across the header and a chat-suggestions bar that no longer exists —
+// team switch, add event, the two things that used to be chat-suggestion
+// buttons (record activity, planning), and the coordinator-only actions.
+function HamburgerMenu({ user, teams, teamId, syncingFecapa, onClose, onSelectTeam, onAddEvent, onRecordActivity, onPlanning, onManageTemplates, onSyncFecapa, onShowOverview, onLogout }: {
+  user: CurrentUser; teams: Team[]; teamId: string; syncingFecapa: boolean;
+  onClose: () => void; onSelectTeam: (teamId: string) => void; onAddEvent: () => void;
+  onRecordActivity: () => void; onPlanning: () => void; onManageTemplates: () => void;
+  onSyncFecapa: () => void; onShowOverview: () => void; onLogout: () => void;
+}) {
+  return <div className="modal-backdrop" role="presentation" onClick={onClose}>
+    <aside className="drawer" role="dialog" aria-modal="true" aria-label="Menú" onClick={(event) => event.stopPropagation()}>
+      <div className="drawer-head"><strong>Menú</strong><button type="button" className="close-btn" aria-label="Tanca" onClick={onClose}>×</button></div>
+      <label>Equip actiu<select value={teamId} onChange={(event) => onSelectTeam(event.target.value)}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label>
+      <hr />
+      <button type="button" className="menu-item" onClick={onAddEvent}>Afegir esdeveniment</button>
+      <button type="button" className="menu-item" onClick={onRecordActivity}>Registrar activitat</button>
+      <button type="button" className="menu-item" onClick={onPlanning}>Planificació</button>
+      {user.global_access && <>
+        <hr />
+        <button type="button" className="menu-item" onClick={onManageTemplates}>Accions per tipus</button>
+        <button type="button" className="menu-item" disabled={syncingFecapa} onClick={onSyncFecapa}>{syncingFecapa ? "Sincronitzant…" : "Sincronitzar FECAPA"}</button>
+        <button type="button" className="menu-item" onClick={onShowOverview}>Visió global</button>
+      </>}
+      <hr />
+      <button type="button" className="menu-item danger" onClick={onLogout}>Sortir</button>
+    </aside>
+  </div>;
+}
 
 function eventTypeLabel(type: "training" | "match" | "meeting") { return type === "training" ? "Entrenament" : type === "match" ? "Partit" : "Reunió"; }
 function readinessDotClass(readiness: EventReadiness) { return readiness === "done" ? "done" : readiness === "in_progress" ? "wip" : "none"; }
@@ -527,20 +548,6 @@ function Login({ onLogin, loading, error }: { onLogin: (email: string, password:
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   return <main className="login"><section className="login-card"><img className="club-logo" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1><p className="intro">Planifica, registra i acompanya l'evolució del teu equip.</p><form onSubmit={(event) => { event.preventDefault(); void onLogin(email, password); }}><label>Correu autoritzat<input type="email" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} required placeholder="entrenador@hcsentmenat.cat" /></label><label>Contrasenya<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>{error && <p className="error" role="alert">{error}</p>}<button disabled={loading}>{loading ? "Validant…" : "Entrar"}</button></form><small>Accés privat per a entrenadors i coordinació.</small></section></main>;
-}
-
-function Composer({ disabled, onSend }: { disabled: boolean; onSend: (message: string) => Promise<void> }) {
-  const [message, setMessage] = useState("");
-  const [listening, setListening] = useState(false);
-  function submit(event: FormEvent) { event.preventDefault(); if (!message.trim()) return; const value = message; setMessage(""); void onSend(value); }
-  function dictate() {
-    const SpeechRecognition = (window as typeof window & { SpeechRecognition?: new () => { lang: string; start(): void; onresult: (event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void; onend: () => void; onerror: () => void } }).SpeechRecognition
-      ?? (window as typeof window & { webkitSpeechRecognition?: new () => { lang: string; start(): void; onresult: (event: { results: ArrayLike<{ 0: { transcript: string } }> }) => void; onend: () => void; onerror: () => void } }).webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-    const recognition = new SpeechRecognition(); recognition.lang = "ca-ES"; setListening(true);
-    recognition.onresult = (event) => setMessage(event.results[0]?.[0].transcript ?? ""); recognition.onend = () => setListening(false); recognition.onerror = () => setListening(false); recognition.start();
-  }
-  return <form className="composer" onSubmit={submit}><button type="button" className="voice" onClick={dictate} disabled={disabled} aria-label="Dictar missatge">{listening ? "Escoltant…" : "Micròfon"}</button><textarea aria-label="Missatge per a l'assistent" rows={1} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Escriu o dicta una consulta…" disabled={disabled} /><button aria-label="Enviar" disabled={disabled || !message.trim()}>Enviar</button></form>;
 }
 
 createRoot(document.getElementById("root")!).render(<App />);
