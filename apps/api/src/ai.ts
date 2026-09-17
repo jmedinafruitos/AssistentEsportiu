@@ -46,6 +46,10 @@ const completionSchema = z.object({
   choices: z.array(z.object({ message: z.object({ content: z.string() }) })).min(1),
 });
 
+// A message's content is either plain text or an OpenAI-style multimodal
+// content-parts array (text + image_url), for vision calls (JME-36).
+export type AiMessage = { role: "system" | "user" | "assistant"; content: unknown };
+
 export class ConfigurableAiService {
   constructor(private readonly configuration: AiConfiguration) {}
 
@@ -58,28 +62,36 @@ export class ConfigurableAiService {
     message: string;
     history?: Array<{ role: "user" | "assistant"; content: string }>;
   }): Promise<{ content: string; model: string }> {
-    if (!this.configuration.apiKey) throw new Error("AI_NOT_CONFIGURED");
+    return this.complete([
+      { role: "system", content: buildSystemPrompt(input.context) },
+      ...(input.history ?? []),
+      { role: "user", content: input.message },
+    ]);
+  }
 
-    const body = JSON.stringify({
-      model: this.configuration.model,
-      messages: [
-        { role: "system", content: buildSystemPrompt(input.context) },
-        ...(input.history ?? []),
-        { role: "user", content: input.message },
-      ],
-    });
+  // General-purpose completion for callers outside the chat assistant flow
+  // (document summarization, image description — JME-36) that need their
+  // own message list rather than the assistant's fixed system prompt.
+  // timeoutMs defaults to the chat-tuned budget; callers drafting a full
+  // structured JSON document from a large context (training-preparation.ts,
+  // strategy-proposals.ts) should pass a longer one — a large prompt asking
+  // for a full JSON object back can genuinely take longer than a short chat
+  // reply, and 20s wasn't enough in practice (JME-44 preprod smoke test).
+  async complete(messages: AiMessage[], timeoutMs = 20_000): Promise<{ content: string; model: string }> {
+    if (!this.configuration.apiKey) throw new Error("AI_NOT_CONFIGURED");
+    const body = JSON.stringify({ model: this.configuration.model, messages });
 
     // One retry after a transient failure (timeout, network error, or a
     // 429/5xx from the provider) so a single slow or flaky response doesn't
-    // fail the whole chat turn outright. A non-transient error (4xx other
-    // than 429) fails immediately — retrying it would just repeat the same
+    // fail the whole call outright. A non-transient error (4xx other than
+    // 429) fails immediately — retrying it would just repeat the same
     // rejection.
     try {
-      return await this.attempt(body, 20_000);
+      return await this.attempt(body, timeoutMs);
     } catch (error) {
       if (!this.isTransient(error)) throw error;
       await new Promise((resolve) => setTimeout(resolve, 300));
-      return await this.attempt(body, 15_000);
+      return await this.attempt(body, Math.round(timeoutMs * 0.75));
     }
   }
 
