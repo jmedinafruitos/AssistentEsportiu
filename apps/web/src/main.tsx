@@ -35,6 +35,9 @@ function App() {
   const [preparing, setPreparing] = useState<{ id: string; teamId: string } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [managingPlayers, setManagingPlayers] = useState(false);
+  // JME-54: cross-cutting filter, independent of team scope — not
+  // persisted, defaults to "Tots" (unfiltered) each visit.
+  const [mineOnly, setMineOnly] = useState(false);
 
   useEffect(() => { void passkeysAvailable().then(setCanUsePasskeys); }, []);
 
@@ -49,13 +52,15 @@ function App() {
   const week = useMemo(() => weekBounds(weekOffset), [weekOffset]);
   useEffect(() => {
     if (!token || !teamId) { setEvents([]); return; }
-    const fetchEvents = teamId === ALL_TEAMS ? api.allEvents(token, { from: week.from, to: week.to }) : api.events(token, teamId, { from: week.from, to: week.to });
+    const weekQuery = { from: week.from, to: week.to, mine: mineOnly };
+    const fetchEvents = teamId === ALL_TEAMS ? api.allEvents(token, weekQuery) : api.events(token, teamId, weekQuery);
     void fetchEvents.then((result) => setEvents(result.events)).catch(() => {});
-  }, [token, teamId, week.from, week.to]);
+  }, [token, teamId, week.from, week.to, mineOnly]);
 
   async function refreshEvents() {
     if (!teamId) return;
-    const result = teamId === ALL_TEAMS ? await api.allEvents(token, { from: week.from, to: week.to }) : await api.events(token, teamId, { from: week.from, to: week.to });
+    const weekQuery = { from: week.from, to: week.to, mine: mineOnly };
+    const result = teamId === ALL_TEAMS ? await api.allEvents(token, weekQuery) : await api.events(token, teamId, weekQuery);
     setEvents(result.events);
   }
 
@@ -108,7 +113,7 @@ function App() {
   // JME-47: an open event workspace takes over the whole screen instead of
   // overlaying the home screen — "Enrere" inside each component returns
   // here by clearing this state.
-  if (selectedEvent) return <EventDetail token={token} teamId={selectedEvent.event.team_id} detail={selectedEvent} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />;
+  if (selectedEvent) return <EventDetail token={token} teamId={selectedEvent.event.team_id} detail={selectedEvent} canReassignOwner={user.global_access} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />;
   if (preparing) return <TrainingPreparationModal token={token} teamId={preparing.teamId} eventId={preparing.id} teamName={teams.find((team) => team.id === preparing.teamId)?.name ?? "l'equip"} onClose={() => setPreparing(null)} />;
 
   return <main className="assistant-shell">
@@ -118,12 +123,12 @@ function App() {
     </header>
     {(activeTeam || teamId === ALL_TEAMS) && <p className="team-pill-row"><span className="team-pill">{teamId === ALL_TEAMS ? "Tots els equips" : `${activeTeam!.name} · ${activeTeam!.season}`}</span></p>}
     <section className="events">
-      <div className="events-header"><h2>Esdeveniments</h2></div>
+      <div className="events-header"><h2>Esdeveniments</h2><div className="dialog-actions mode-switch"><button type="button" className={mineOnly ? "" : "quiet"} onClick={() => setMineOnly(true)}>Meus</button><button type="button" className={mineOnly ? "quiet" : ""} onClick={() => setMineOnly(false)}>Tots</button></div></div>
       <div className="week-nav"><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current - 1)} aria-label="Setmana anterior">‹</button><span>{week.label}</span><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current + 1)} aria-label="Setmana següent">›</button></div>
       {events.length
         ? <ul className="event-list">{events.map((event) => {
             const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
-            return <li key={event.id} className="event-card"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{teamId === ALL_TEAMS && <em className="event-team-tag">{event.team_name}</em>}{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="row-action" onClick={() => setPreparing({ id: event.id, teamId: event.team_id })}>{prepareActionLabel(event.readiness)}</button>}</li>;
+            return <li key={event.id} className="event-card"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{teamId === ALL_TEAMS && <em className="event-team-tag">{event.team_name}</em>}{!mineOnly && event.owner_name && <em className="event-team-tag">{event.owner_name}</em>}{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="row-action" onClick={() => setPreparing({ id: event.id, teamId: event.team_id })}>{prepareActionLabel(event.readiness)}</button>}</li>;
           })}</ul>
         : <p className="empty">Sense esdeveniments aquesta setmana.</p>}
     </section>
@@ -224,7 +229,7 @@ function formatEventDateRange(event: TeamEvent) {
   return `${startLabel}–${endTime}`;
 }
 
-function EventDetail({ token, teamId, detail, onClose, onChanged }: { token: string; teamId: string; detail: { event: TeamEvent; actions: EventAction[] }; onClose: () => void; onChanged: (detail: { event: TeamEvent; actions: EventAction[] }) => void }) {
+function EventDetail({ token, teamId, detail, canReassignOwner, onClose, onChanged }: { token: string; teamId: string; detail: { event: TeamEvent; actions: EventAction[] }; canReassignOwner: boolean; onClose: () => void; onChanged: (detail: { event: TeamEvent; actions: EventAction[] }) => void }) {
   const { event, actions } = detail;
   const [error, setError] = useState("");
   const [editingSeries, setEditingSeries] = useState(false);
@@ -236,12 +241,17 @@ function EventDetail({ token, teamId, detail, onClose, onChanged }: { token: str
     try { onChanged({ event: await api.updateEvent(token, teamId, event.id, { canceled: !event.canceled }), actions }); }
     catch { setError("No s'ha pogut actualitzar l'esdeveniment."); }
   }
+  async function reassignOwner(ownerId: string | null) {
+    try { onChanged({ event: await api.updateEvent(token, teamId, event.id, { ownerId }), actions }); }
+    catch { setError("No s'ha pogut canviar l'assignació."); }
+  }
   const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
   // JME-47: full-screen workspace (was a modal) — "Enrere" replaces the old
   // bottom "Tancar" button as the way back to the events list.
   return <main className="workspace-screen">
     <header className="ws-header"><button type="button" className="back-btn" aria-label="Enrere" onClick={onClose}>‹</button><div className="ws-title"><strong>{eventTypeLabel(event.event_type)}{showTitle && ` · ${event.title}`}</strong><span>{formatEventDateRange(event)}{event.location && <> · {event.location}</>}</span></div></header>
     <div className="ws-body">
+      <OwnerRow token={token} teamId={teamId} event={event} canReassign={canReassignOwner} onReassign={reassignOwner} />
       {event.notes && <div className="notes-card">{event.notes}</div>}
       {actions.length > 0 && <div className="checklist-card"><h3>Accions</h3><ul className="checklist">{actions.map((action) => <li key={action.id}><label><input type="checkbox" checked={Boolean(action.completed_at)} onChange={(evt) => void toggleAction(action.id, evt.target.checked)} />{action.label}</label></li>)}</ul></div>}
       {event.event_type === "match" && !event.canceled && <RosterEditor token={token} teamId={teamId} event={event} />}
@@ -250,6 +260,25 @@ function EventDetail({ token, teamId, detail, onClose, onChanged }: { token: str
     <div className="bottom-nav">{event.training_series_id && <button type="button" className="quiet" onClick={() => setEditingSeries(true)}>Editar sèrie</button>}<button type="button" className="quiet" onClick={() => void toggleCanceled()}>{event.canceled ? "Reactivar" : "Cancel·lar esdeveniment"}</button></div>
     {editingSeries && event.training_series_id && <SeriesEditor token={token} teamId={teamId} seriesId={event.training_series_id} fromEventId={event.id} onClose={() => setEditingSeries(false)} onSaved={() => { setEditingSeries(false); onClose(); }} />}
   </main>;
+}
+
+// JME-54: "assignat a" is a label/filter, not an access boundary — every
+// coach still edits the event the same way they always could. Only the
+// coordinator (canReassign) gets the picker; everyone else sees plain text.
+function OwnerRow({ token, teamId, event, canReassign, onReassign }: { token: string; teamId: string; event: TeamEvent; canReassign: boolean; onReassign: (ownerId: string | null) => void }) {
+  const [coaches, setCoaches] = useState<Array<{ id: string; name: string }> | null>(null);
+  useEffect(() => {
+    if (!canReassign) return;
+    void api.teamCoaches(token, teamId).then((result) => setCoaches(result.coaches)).catch(() => setCoaches([]));
+  }, [token, teamId, canReassign]);
+
+  if (!canReassign) return <p className="owner-row">Assignat a: <strong>{event.owner_name ?? "Sense assignar"}</strong></p>;
+  return <label className="owner-row">Assignat a
+    <select value={event.owner_id ?? ""} onChange={(evt) => onReassign(evt.target.value || null)} disabled={!coaches}>
+      <option value="">Sense assignar</option>
+      {coaches?.map((coach) => <option key={coach.id} value={coach.id}>{coach.name}</option>)}
+    </select>
+  </label>;
 }
 
 function describeConflict(playerName: string, conflict: ConflictDetail, blocked: boolean): string {

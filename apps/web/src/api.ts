@@ -96,6 +96,10 @@ export type TeamEvent = {
   // with AI) correctly even when the page-level team selector is set to
   // "Tots els equips" and isn't a reliable ambient team_id anymore.
   team_id: string; team_name: string;
+  // JME-54: defaults to the team's earliest-assigned coach; the
+  // coordinator can reassign it. Label/filter only — doesn't affect who
+  // can edit the event.
+  owner_id: string | null; owner_name: string | null;
 };
 // JME-49: a player is club data, not a login account — see players table.
 export type Player = {
@@ -129,6 +133,10 @@ export type EventTypeActionTemplate = {
   sort_order: number; active: boolean; category?: string | null; team?: string | null;
 };
 export type FecapaSyncSummary = { leagues: number; matchesSeen: number; eventsCreated: number; eventsUpdated: number };
+
+function weekParams(week: { from: string; to: string; mine?: boolean }): Record<string, string> {
+  return week.mine ? { from: week.from, to: week.to, mine: "true" } : { from: week.from, to: week.to };
+}
 
 async function request<T>(path: string, options: RequestInit = {}, token?: string): Promise<T> {
   // Only set content-type when there's actually a body — Fastify's default
@@ -196,19 +204,22 @@ export const api = {
   plan: (token: string, teamId: string) => request<{ plan: TeamPlan | null }>(`/v1/teams/${teamId}/plan`, {}, token),
   savePlan: (token: string, teamId: string, plan: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string; version?: number }) => request<TeamPlan>(`/v1/teams/${teamId}/plan`, { method: "PUT", body: JSON.stringify(plan) }, token),
   assistantResults: (token: string, teamId: string) => request<{ results: AssistantResult[] }>(`/v1/teams/${teamId}/assistant-results`, {}, token),
-  events: (token: string, teamId: string, week: { from: string; to: string }) =>
-    request<{ events: TeamEvent[] }>(`/v1/teams/${teamId}/events?${new URLSearchParams(week)}`, {}, token),
+  events: (token: string, teamId: string, week: { from: string; to: string; mine?: boolean }) =>
+    request<{ events: TeamEvent[] }>(`/v1/teams/${teamId}/events?${new URLSearchParams(weekParams(week))}`, {}, token),
   // "Tots els equips": merged events across every team the user can
   // access, same weekly window as events() above.
-  allEvents: (token: string, week: { from: string; to: string }) =>
-    request<{ events: TeamEvent[] }>(`/v1/events?${new URLSearchParams(week)}`, {}, token),
+  allEvents: (token: string, week: { from: string; to: string; mine?: boolean }) =>
+    request<{ events: TeamEvent[] }>(`/v1/events?${new URLSearchParams(weekParams(week))}`, {}, token),
+  // JME-54: eligible owners for the reassignment picker.
+  teamCoaches: (token: string, teamId: string) =>
+    request<{ coaches: Array<{ id: string; name: string }> }>(`/v1/teams/${teamId}/coaches`, {}, token),
   createEvent: (token: string, teamId: string, event: { eventType: "training" | "match" | "meeting"; title: string; startsAt: string; endsAt?: string; location?: string; notes?: string; isHome?: boolean }) =>
     request<{ event: TeamEvent; actions: EventAction[] }>(`/v1/teams/${teamId}/events`, { method: "POST", body: JSON.stringify(event) }, token),
   generateTrainings: (token: string, teamId: string, plan: { title?: string; weekdays: number[]; time: string; durationMinutes?: number; from: string; to: string }) =>
     request<{ created: number; events: TeamEvent[] }>(`/v1/teams/${teamId}/events/generate-trainings`, { method: "POST", body: JSON.stringify(plan) }, token),
   eventDetail: (token: string, teamId: string, eventId: string) =>
     request<{ event: TeamEvent; actions: EventAction[] }>(`/v1/teams/${teamId}/events/${eventId}`, {}, token),
-  updateEvent: (token: string, teamId: string, eventId: string, patch: { title?: string; startsAt?: string; endsAt?: string | null; location?: string | null; notes?: string | null; canceled?: boolean; isHome?: boolean | null }) =>
+  updateEvent: (token: string, teamId: string, eventId: string, patch: { title?: string; startsAt?: string; endsAt?: string | null; location?: string | null; notes?: string | null; canceled?: boolean; isHome?: boolean | null; ownerId?: string | null }) =>
     request<TeamEvent>(`/v1/teams/${teamId}/events/${eventId}`, { method: "PATCH", body: JSON.stringify(patch) }, token),
   addEventAction: (token: string, teamId: string, eventId: string, action: { label: string; content?: Record<string, unknown> }) =>
     request<EventAction>(`/v1/teams/${teamId}/events/${eventId}/actions`, { method: "POST", body: JSON.stringify(action) }, token),

@@ -1,5 +1,5 @@
 import { Queryable } from "./db.js";
-import { materializeEventActions } from "./events.js";
+import { materializeEventActions, resolveDefaultOwner } from "./events.js";
 
 export type TrainingSeries = {
   id: string;
@@ -45,6 +45,9 @@ export async function generateSeriesOccurrences(
   const weekdaySet = new Set(series.weekdays);
   const [hour, minute] = series.time.split(":").map(Number);
   const created = [];
+  // JME-54: same owner for every occurrence generated in this call —
+  // resolved once rather than per row, since it's always the same team.
+  const ownerId = await resolveDefaultOwner(db, series.team_id);
 
   for (
     const cursor = new Date(fromDate);
@@ -59,11 +62,12 @@ export async function generateSeriesOccurrences(
     const endsAt = series.duration_minutes ? new Date(startsAt.getTime() + series.duration_minutes * 60_000) : null;
 
     const event = await db.query(
-      `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, source, training_series_id, created_by)
-       VALUES ($1, 'training', $2, $3, $4, 'recurring', $5, $6)
-       RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at, training_series_id, team_id,
-                 (SELECT name FROM teams WHERE id = $1) AS team_name`,
-      [series.team_id, series.title, startsAt.toISOString(), endsAt ? endsAt.toISOString() : null, series.id, createdBy],
+      `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, source, training_series_id, created_by, owner_id)
+       VALUES ($1, 'training', $2, $3, $4, 'recurring', $5, $6, $7)
+       RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at, training_series_id, team_id, owner_id,
+                 (SELECT name FROM teams WHERE id = $1) AS team_name,
+                 (SELECT name FROM users WHERE id = $7) AS owner_name`,
+      [series.team_id, series.title, startsAt.toISOString(), endsAt ? endsAt.toISOString() : null, series.id, createdBy, ownerId],
     );
     const createdEvent = event.rows[0];
     await materializeEventActions(db, createdEvent.id, series.team_id, categoryId, "training");
