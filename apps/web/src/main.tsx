@@ -250,6 +250,14 @@ function describeConflict(playerName: string, conflict: ConflictDetail, blocked:
 // it's opened (server-side, JME-51's copyFromPreviousMatch) — always-live
 // editing after that, no draft/publish state. Same-slot conflicts are a
 // hard block; the 3h away-gap warning asks for explicit confirmation.
+function TrashButton({ onClick }: { onClick: () => void }) {
+  return <button type="button" className="trash-btn" aria-label="Treure de la convocatòria" onClick={onClick}>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" /><path d="M10 11v6" /><path d="M14 11v6" /><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </svg>
+  </button>;
+}
+
 function RosterEditor({ token, teamId, event }: { token: string; teamId: string; event: TeamEvent }) {
   const [entries, setEntries] = useState<RosterEntry[] | null>(null);
   const [notice, setNotice] = useState("");
@@ -307,8 +315,8 @@ function RosterEditor({ token, teamId, event }: { token: string; teamId: string;
     {notice && <p className="notice">{notice}</p>}
     {entries.length === 0 && <p className="empty">Encara no hi ha jugadors convocats.</p>}
     <ul className="checklist">
-      {home.map((entry) => <li key={entry.id}>{entry.player_name}<button type="button" className="text-action" onClick={() => void removePlayer(entry.player_id)}>Treure</button></li>)}
-      {guests.map((entry) => <li key={entry.id}>{entry.player_name} <em>({entry.player_team_name})</em>{entry.conflict_override && <span className="layer-badge">risc 3h</span>}<button type="button" className="text-action" onClick={() => void removePlayer(entry.player_id)}>Treure</button></li>)}
+      {home.map((entry) => <li key={entry.id} className="roster-row"><span className="roster-name">{entry.player_name}</span><TrashButton onClick={() => void removePlayer(entry.player_id)} /></li>)}
+      {guests.map((entry) => <li key={entry.id} className="roster-row"><span className="roster-name">{entry.player_name} <em>({entry.player_team_name})</em>{entry.conflict_override && <span className="layer-badge">risc 3h</span>}</span><TrashButton onClick={() => void removePlayer(entry.player_id)} /></li>)}
     </ul>
     <label>Afegir jugador (de qualsevol equip)<input value={searchQuery} onChange={(evt) => setSearchQuery(evt.target.value)} placeholder="Cerca pel nom…" /></label>
     {searchResults.length > 0 && <ul className="template-list">{searchResults.filter((player) => !entries.some((entry) => entry.player_id === player.id)).map((player) => <li key={player.id}><span>{player.name}</span><span>{player.team_name}</span><button type="button" className="text-action" disabled={adding} onClick={() => void addPlayer(player)}>Afegir</button></li>)}</ul>}
