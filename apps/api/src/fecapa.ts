@@ -148,19 +148,50 @@ export async function syncFecapaCalendars(db: Queryable): Promise<FecapaSyncSumm
         const title = `${match.homeName} - ${match.awayName}`;
         const startsAt = toStartsAt(match.gamedate, match.time);
         const externalRef = `${idc}:${match.homeId}:${match.awayId}:${match.gamedate}`;
+        const idA = Math.min(match.homeId, match.awayId);
+        const idB = Math.max(match.homeId, match.awayId);
+
+        // FECAPA occasionally republishes a match with a shifted date or a
+        // swapped home/away side (JME-48) — matching on the exact
+        // external_ref would treat that as a brand new fixture and leave a
+        // stale duplicate behind. Instead, identify "the same real fixture"
+        // by team + unordered opponent pair + gamedate within a few days,
+        // and update that row in place. A real rematch against the same
+        // opponent later in the season falls outside the window and still
+        // inserts as its own row.
+        const existing = await db.query(
+          `SELECT id FROM team_events
+           WHERE team_id = $1 AND source = 'fecapa' AND canceled = false
+             AND split_part(external_ref, ':', 1) = $2
+             AND LEAST(split_part(external_ref, ':', 2)::int, split_part(external_ref, ':', 3)::int) = $3
+             AND GREATEST(split_part(external_ref, ':', 2)::int, split_part(external_ref, ':', 3)::int) = $4
+             AND abs(to_date(split_part(external_ref, ':', 4), 'YYYYMMDD') - to_date($5, 'YYYYMMDD')) <= 3
+           ORDER BY updated_at DESC
+           LIMIT 1`,
+          [team.id, String(idc), idA, idB, match.gamedate],
+        );
 
         // notes is intentionally never touched here, on insert or update —
         // a coach may have added their own notes to an imported match, and
         // a later sync must not silently wipe them out.
-        const result = await db.query(
-          `INSERT INTO team_events (team_id, event_type, title, starts_at, source, external_ref)
-           VALUES ($1, 'match', $2, $3, 'fecapa', $4)
-           ON CONFLICT (team_id, external_ref) DO UPDATE
-             SET title = EXCLUDED.title, starts_at = EXCLUDED.starts_at, updated_at = now()
-           RETURNING id, (xmax = 0) AS inserted`,
-          [team.id, title, startsAt, externalRef],
-        );
-        const row = result.rows[0] as { id: string; inserted: boolean };
+        let row: { id: string; inserted: boolean };
+        if (existing.rows.length > 0) {
+          const result = await db.query(
+            `UPDATE team_events SET title = $2, starts_at = $3, external_ref = $4, updated_at = now()
+             WHERE id = $1
+             RETURNING id, false AS inserted`,
+            [existing.rows[0].id, title, startsAt, externalRef],
+          );
+          row = result.rows[0] as { id: string; inserted: boolean };
+        } else {
+          const result = await db.query(
+            `INSERT INTO team_events (team_id, event_type, title, starts_at, source, external_ref)
+             VALUES ($1, 'match', $2, $3, 'fecapa', $4)
+             RETURNING id, true AS inserted`,
+            [team.id, title, startsAt, externalRef],
+          );
+          row = result.rows[0] as { id: string; inserted: boolean };
+        }
         if (row.inserted) {
           summary.eventsCreated += 1;
           await materializeEventActions(db, row.id, team.id, team.category_id, "match");
