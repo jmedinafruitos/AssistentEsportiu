@@ -91,6 +91,11 @@ export type TeamEvent = {
   is_home: boolean | null;
   source: "manual" | "recurring" | "fecapa"; canceled: boolean; created_at: string;
   training_series_id?: string | null; overridden?: boolean; readiness: EventReadiness;
+  // Always present (own team_id, or the merged "all teams" view) — lets
+  // an event-list row drive team-scoped actions (open detail, prepare
+  // with AI) correctly even when the page-level team selector is set to
+  // "Tots els equips" and isn't a reliable ambient team_id anymore.
+  team_id: string; team_name: string;
 };
 // JME-49: a player is club data, not a login account — see players table.
 export type Player = {
@@ -187,6 +192,10 @@ export const api = {
   assistantResults: (token: string, teamId: string) => request<{ results: AssistantResult[] }>(`/v1/teams/${teamId}/assistant-results`, {}, token),
   events: (token: string, teamId: string, week: { from: string; to: string }) =>
     request<{ events: TeamEvent[] }>(`/v1/teams/${teamId}/events?${new URLSearchParams(week)}`, {}, token),
+  // "Tots els equips": merged events across every team the user can
+  // access, same weekly window as events() above.
+  allEvents: (token: string, week: { from: string; to: string }) =>
+    request<{ events: TeamEvent[] }>(`/v1/events?${new URLSearchParams(week)}`, {}, token),
   createEvent: (token: string, teamId: string, event: { eventType: "training" | "match" | "meeting"; title: string; startsAt: string; endsAt?: string; location?: string; notes?: string; isHome?: boolean }) =>
     request<{ event: TeamEvent; actions: EventAction[] }>(`/v1/teams/${teamId}/events`, { method: "POST", body: JSON.stringify(event) }, token),
   generateTrainings: (token: string, teamId: string, plan: { title?: string; weekdays: number[]; time: string; durationMinutes?: number; from: string; to: string }) =>

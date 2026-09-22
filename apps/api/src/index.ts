@@ -540,7 +540,45 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
     // no AI workflow, it's the completion ratio of the event's own
     // checklist (team_event_actions, JME-29) instead.
     `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.is_home, te.source, te.canceled, te.created_at,
-            te.training_series_id, te.overridden,
+            te.training_series_id, te.overridden, te.team_id, t.name AS team_name,
+            CASE
+              WHEN te.event_type = 'training' THEN COALESCE((
+                SELECT CASE WHEN tp.status = 'drafting' THEN 'in_progress' WHEN tp.status IN ('ready', 'sent') THEN 'done' END
+                FROM training_preparations tp WHERE tp.team_event_id = te.id
+              ), 'none')
+              ELSE COALESCE((
+                SELECT CASE
+                  WHEN count(*) = 0 THEN 'none'
+                  WHEN count(*) FILTER (WHERE tea.completed_at IS NOT NULL) = count(*) THEN 'done'
+                  WHEN count(*) FILTER (WHERE tea.completed_at IS NOT NULL) = 0 THEN 'none'
+                  ELSE 'in_progress'
+                END
+                FROM team_event_actions tea WHERE tea.team_event_id = te.id
+              ), 'none')
+            END AS readiness
+     FROM team_events te JOIN teams t ON t.id = te.team_id
+     WHERE te.team_id = $1
+       AND te.archived_at IS NULL
+       AND te.starts_at >= COALESCE($2::timestamptz, now() - interval '1 day')
+       AND ($3::timestamptz IS NULL OR te.starts_at < $3::timestamptz)
+     ORDER BY te.starts_at ASC LIMIT 200`,
+    [teamId, query.from ?? null, query.to ?? null],
+  );
+  return { events: result.rows };
+});
+
+// "Tots els equips" (all-teams) view on the events list — same weekly
+// pagination as the per-team endpoint above, just scoped to every team
+// the user can access instead of one team_id.
+app.get("/v1/events", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
+  const identity = request.user as { sub: string };
+  const query = z.object({
+    from: z.string().datetime().optional(),
+    to: z.string().datetime().optional(),
+  }).parse(request.query);
+  const result = await db.query(
+    `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.is_home, te.source, te.canceled, te.created_at,
+            te.training_series_id, te.overridden, te.team_id, t.name AS team_name,
             CASE
               WHEN te.event_type = 'training' THEN COALESCE((
                 SELECT CASE WHEN tp.status = 'drafting' THEN 'in_progress' WHEN tp.status IN ('ready', 'sent') THEN 'done' END
@@ -557,12 +595,14 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
               ), 'none')
             END AS readiness
      FROM team_events te
-     WHERE te.team_id = $1
-       AND te.archived_at IS NULL
+     JOIN teams t ON t.id = te.team_id
+     JOIN users u ON u.id = $1 AND u.active = true
+       AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = te.team_id))
+     WHERE te.archived_at IS NULL
        AND te.starts_at >= COALESCE($2::timestamptz, now() - interval '1 day')
        AND ($3::timestamptz IS NULL OR te.starts_at < $3::timestamptz)
      ORDER BY te.starts_at ASC LIMIT 200`,
-    [teamId, query.from ?? null, query.to ?? null],
+    [identity.sub, query.from ?? null, query.to ?? null],
   );
   return { events: result.rows };
 });

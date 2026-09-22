@@ -5,12 +5,19 @@ import { loginWithPasskey, passkeysAvailable, registerPasskey } from "./webauthn
 import "./styles.css";
 
 const TOKEN_KEY = "assistent-esportiu-token";
+const TEAM_KEY = "assistent-esportiu-team";
+// Sentinel for "Tots els equips" in the team selector — not a real team
+// id, so it never collides with one.
+const ALL_TEAMS = "__all__";
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [user, setUser] = useState<CurrentUser | null>(null);
   const [teams, setTeams] = useState<Team[]>([]);
-  const [teamId, setTeamId] = useState("");
+  // Persisted so the next visit remembers the last selection, including
+  // "Tots els equips" — not just a real team id.
+  const [teamId, setTeamIdState] = useState(() => localStorage.getItem(TEAM_KEY) ?? "");
+  function setTeamId(id: string) { localStorage.setItem(TEAM_KEY, id); setTeamIdState(id); }
   const [loading, setLoading] = useState(Boolean(token));
   const [error, setError] = useState("");
   const [recording, setRecording] = useState(false);
@@ -25,7 +32,7 @@ function App() {
   const [syncingFecapa, setSyncingFecapa] = useState(false);
   const [canUsePasskeys, setCanUsePasskeys] = useState(false);
   const [activatingPasskey, setActivatingPasskey] = useState(false);
-  const [preparingEventId, setPreparingEventId] = useState<string | null>(null);
+  const [preparing, setPreparing] = useState<{ id: string; teamId: string } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [managingPlayers, setManagingPlayers] = useState(false);
 
@@ -35,24 +42,25 @@ function App() {
     if (!token) return;
     setLoading(true);
     Promise.all([api.me(token), api.teams(token)]).then(([identity, result]) => {
-      setUser(identity); setTeams(result.teams); setTeamId((current) => current || result.teams[0]?.id || ""); setError("");
+      setUser(identity); setTeams(result.teams); if (!teamId) setTeamId(result.teams[0]?.id || ""); setError("");
     }).catch(() => logout()).finally(() => setLoading(false));
   }, [token]);
 
   const week = useMemo(() => weekBounds(weekOffset), [weekOffset]);
   useEffect(() => {
     if (!token || !teamId) { setEvents([]); return; }
-    void api.events(token, teamId, { from: week.from, to: week.to }).then((result) => setEvents(result.events)).catch(() => {});
+    const fetchEvents = teamId === ALL_TEAMS ? api.allEvents(token, { from: week.from, to: week.to }) : api.events(token, teamId, { from: week.from, to: week.to });
+    void fetchEvents.then((result) => setEvents(result.events)).catch(() => {});
   }, [token, teamId, week.from, week.to]);
 
   async function refreshEvents() {
     if (!teamId) return;
-    const result = await api.events(token, teamId, { from: week.from, to: week.to });
+    const result = teamId === ALL_TEAMS ? await api.allEvents(token, { from: week.from, to: week.to }) : await api.events(token, teamId, { from: week.from, to: week.to });
     setEvents(result.events);
   }
 
-  async function openEvent(eventId: string) {
-    try { setSelectedEvent(await api.eventDetail(token, teamId, eventId)); }
+  async function openEvent(event: TeamEvent) {
+    try { setSelectedEvent(await api.eventDetail(token, event.team_id, event.id)); }
     catch { setError("No s'ha pogut carregar l'esdeveniment."); }
   }
 
@@ -67,6 +75,11 @@ function App() {
   }
 
   const activeTeam = useMemo(() => teams.find((team) => team.id === teamId), [teams, teamId]);
+  // "Tots els equips" is an events-list viewing mode only — actions that
+  // need one specific team (add event, record activity, planning,
+  // players) fall back to the first team while it's selected.
+  const actionTeam = activeTeam ?? teams[0];
+  const actionTeamId = actionTeam?.id ?? "";
   function logout() { localStorage.removeItem(TOKEN_KEY); setToken(""); setUser(null); setTeams([]); }
 
   function applyToken(newToken: string) { localStorage.setItem(TOKEN_KEY, newToken); setToken(newToken); }
@@ -95,22 +108,22 @@ function App() {
   // JME-47: an open event workspace takes over the whole screen instead of
   // overlaying the home screen — "Enrere" inside each component returns
   // here by clearing this state.
-  if (selectedEvent) return <EventDetail token={token} teamId={teamId} detail={selectedEvent} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />;
-  if (preparingEventId) return <TrainingPreparationModal token={token} teamId={teamId} eventId={preparingEventId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPreparingEventId(null)} />;
+  if (selectedEvent) return <EventDetail token={token} teamId={selectedEvent.event.team_id} detail={selectedEvent} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />;
+  if (preparing) return <TrainingPreparationModal token={token} teamId={preparing.teamId} eventId={preparing.id} teamName={teams.find((team) => team.id === preparing.teamId)?.name ?? "l'equip"} onClose={() => setPreparing(null)} />;
 
   return <main className="assistant-shell">
     <header className="app-header">
       <div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div>
       <button type="button" className="menu-btn" aria-label="Menú" onClick={() => setMenuOpen(true)}><svg width="18" height="14" viewBox="0 0 18 14" fill="none" stroke="#173b6d" strokeWidth="2" strokeLinecap="round"><path d="M1 1h16M1 7h16M1 13h16" /></svg></button>
     </header>
-    {activeTeam && <p className="team-pill-row"><span className="team-pill">{activeTeam.name} · {activeTeam.season}</span></p>}
+    {(activeTeam || teamId === ALL_TEAMS) && <p className="team-pill-row"><span className="team-pill">{teamId === ALL_TEAMS ? "Tots els equips" : `${activeTeam!.name} · ${activeTeam!.season}`}</span></p>}
     <section className="events">
       <div className="events-header"><h2>Esdeveniments</h2></div>
       <div className="week-nav"><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current - 1)} aria-label="Setmana anterior">‹</button><span>{week.label}</span><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current + 1)} aria-label="Setmana següent">›</button></div>
       {events.length
         ? <ul className="event-list">{events.map((event) => {
             const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
-            return <li key={event.id} className="event-card"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.id)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="row-action" onClick={() => setPreparingEventId(event.id)}>{prepareActionLabel(event.readiness)}</button>}</li>;
+            return <li key={event.id} className="event-card"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{teamId === ALL_TEAMS && <em className="event-team-tag">{event.team_name}</em>}{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="row-action" onClick={() => setPreparing({ id: event.id, teamId: event.team_id })}>{prepareActionLabel(event.readiness)}</button>}</li>;
           })}</ul>
         : <p className="empty">Sense esdeveniments aquesta setmana.</p>}
     </section>
@@ -134,10 +147,10 @@ function App() {
       }}
       onLogout={() => { setMenuOpen(false); logout(); }}
     />}
-    {recording && <RecordCapture teamName={activeTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, teamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
-    {planning && <PlanningEditor token={token} teamId={teamId} teamName={activeTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
-    {managingPlayers && <PlayersEditor token={token} teams={teams} teamId={teamId} onClose={() => setManagingPlayers(false)} />}
-    {creatingEvent && <EventEditor token={token} teamId={teamId} onClose={() => setCreatingEvent(false)} onSaved={() => { setCreatingEvent(false); void refreshEvents(); }} />}
+    {recording && <RecordCapture teamName={actionTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, actionTeamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
+    {planning && <PlanningEditor token={token} teamId={actionTeamId} teamName={actionTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
+    {managingPlayers && <PlayersEditor token={token} teams={teams} teamId={actionTeamId} onClose={() => setManagingPlayers(false)} />}
+    {creatingEvent && <EventEditor token={token} teamId={actionTeamId} onClose={() => setCreatingEvent(false)} onSaved={() => { setCreatingEvent(false); void refreshEvents(); }} />}
     {managingTemplates && <ActionTemplatesEditor token={token} teams={teams} onClose={() => setManagingTemplates(false)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
@@ -157,7 +170,7 @@ function HamburgerMenu({ user, teams, teamId, syncingFecapa, canUsePasskeys, act
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <aside className="drawer" role="dialog" aria-modal="true" aria-label="Menú" onClick={(event) => event.stopPropagation()}>
       <div className="drawer-head"><strong>Menú</strong><button type="button" className="close-btn" aria-label="Tanca" onClick={onClose}>×</button></div>
-      <label>Equip actiu<select value={teamId} onChange={(event) => onSelectTeam(event.target.value)}>{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label>
+      <label>Equip actiu<select value={teamId} onChange={(event) => onSelectTeam(event.target.value)}>{teams.length > 1 && <option value={ALL_TEAMS}>Tots els equips</option>}{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label>
       <hr />
       <button type="button" className="menu-item" onClick={onAddEvent}>Afegir esdeveniment</button>
       <button type="button" className="menu-item" onClick={onRecordActivity}>Registrar activitat</button>
