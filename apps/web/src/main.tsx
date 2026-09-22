@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, ConflictDetail, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, Player, RecordInput, RefineAction, RosterEntry, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, ConflictDetail, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, Player, RecordInput, RefineAction, RosterEntry, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
 import { loginWithPasskey, passkeysAvailable, registerPasskey } from "./webauthn";
 import "./styles.css";
 
@@ -38,6 +38,7 @@ function App() {
   // JME-54: cross-cutting filter, independent of team scope — not
   // persisted, defaults to "Tots" (unfiltered) each visit.
   const [mineOnly, setMineOnly] = useState(false);
+  const [viewingMatches, setViewingMatches] = useState(false);
 
   useEffect(() => { void passkeysAvailable().then(setCanUsePasskeys); }, []);
 
@@ -64,8 +65,8 @@ function App() {
     setEvents(result.events);
   }
 
-  async function openEvent(event: TeamEvent) {
-    try { setSelectedEvent(await api.eventDetail(token, event.team_id, event.id)); }
+  async function openEvent(eventTeamId: string, eventId: string) {
+    try { setSelectedEvent(await api.eventDetail(token, eventTeamId, eventId)); setViewingMatches(false); }
     catch { setError("No s'ha pogut carregar l'esdeveniment."); }
   }
 
@@ -115,6 +116,7 @@ function App() {
   // here by clearing this state.
   if (selectedEvent) return <EventDetail token={token} teamId={selectedEvent.event.team_id} detail={selectedEvent} canReassignOwner={user.global_access} onClose={() => setSelectedEvent(null)} onChanged={(detail) => { setSelectedEvent(detail); void refreshEvents(); }} />;
   if (preparing) return <TrainingPreparationModal token={token} teamId={preparing.teamId} eventId={preparing.id} teamName={teams.find((team) => team.id === preparing.teamId)?.name ?? "l'equip"} onClose={() => setPreparing(null)} />;
+  if (viewingMatches) return <MatchesOverview token={token} onOpenEvent={(eventTeamId, eventId) => void openEvent(eventTeamId, eventId)} onClose={() => setViewingMatches(false)} />;
 
   return <main className="assistant-shell">
     <header className="app-header">
@@ -128,7 +130,7 @@ function App() {
       {events.length
         ? <ul className="event-list">{events.map((event) => {
             const showTitle = event.title.trim().toLowerCase() !== eventTypeLabel(event.event_type).toLowerCase();
-            return <li key={event.id} className="event-card"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{teamId === ALL_TEAMS && <em className="event-team-tag">{event.team_name}</em>}{!mineOnly && event.owner_name && <em className="event-team-tag">{event.owner_name}</em>}{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="row-action" onClick={() => setPreparing({ id: event.id, teamId: event.team_id })}>{prepareActionLabel(event.readiness)}</button>}</li>;
+            return <li key={event.id} className="event-card"><button type="button" className={`event-item ${event.canceled ? "canceled" : ""}`} onClick={() => void openEvent(event.team_id, event.id)}><span className={`status-dot ${readinessDotClass(event.readiness)}`} aria-label={readinessLabel(event.readiness)} title={readinessLabel(event.readiness)} /><span className={`event-type ${event.event_type}`}>{eventTypeLabel(event.event_type)}</span>{teamId === ALL_TEAMS && <em className="event-team-tag">{event.team_name}</em>}{!mineOnly && event.owner_name && <em className="event-team-tag">{event.owner_name}</em>}{showTitle && <strong>{event.title}</strong>}<span>{formatEventTime(event)}</span>{event.canceled && <em>Cancel·lat</em>}</button>{event.event_type === "training" && !event.canceled && <button type="button" className="row-action" onClick={() => setPreparing({ id: event.id, teamId: event.team_id })}>{prepareActionLabel(event.readiness)}</button>}</li>;
           })}</ul>
         : <p className="empty">Sense esdeveniments aquesta setmana.</p>}
     </section>
@@ -145,6 +147,7 @@ function App() {
       onManageTemplates={() => { setManagingTemplates(true); setMenuOpen(false); }}
       onSyncFecapa={() => { setMenuOpen(false); void syncFecapa(); }}
       onActivatePasskey={() => void activatePasskey()}
+      onViewMatches={() => { setViewingMatches(true); setMenuOpen(false); }}
       onShowOverview={() => {
         setMenuOpen(false);
         if (overview) setOverview(null);
@@ -166,11 +169,11 @@ function App() {
 // across the header and a chat-suggestions bar that no longer exists —
 // team switch, add event, the two things that used to be chat-suggestion
 // buttons (record activity, planning), and the coordinator-only actions.
-function HamburgerMenu({ user, teams, teamId, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onSelectTeam, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onShowOverview, onLogout }: {
+function HamburgerMenu({ user, teams, teamId, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onSelectTeam, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onLogout }: {
   user: CurrentUser; teams: Team[]; teamId: string; syncingFecapa: boolean; canUsePasskeys: boolean; activatingPasskey: boolean;
   onClose: () => void; onSelectTeam: (teamId: string) => void; onAddEvent: () => void;
   onRecordActivity: () => void; onPlanning: () => void; onManagePlayers: () => void; onManageTemplates: () => void;
-  onSyncFecapa: () => void; onActivatePasskey: () => void; onShowOverview: () => void; onLogout: () => void;
+  onSyncFecapa: () => void; onActivatePasskey: () => void; onViewMatches: () => void; onShowOverview: () => void; onLogout: () => void;
 }) {
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <aside className="drawer" role="dialog" aria-modal="true" aria-label="Menú" onClick={(event) => event.stopPropagation()}>
@@ -186,6 +189,7 @@ function HamburgerMenu({ user, teams, teamId, syncingFecapa, canUsePasskeys, act
         <hr />
         <button type="button" className="menu-item" onClick={onManageTemplates}>Accions per tipus</button>
         <button type="button" className="menu-item" disabled={syncingFecapa} onClick={onSyncFecapa}>{syncingFecapa ? "Sincronitzant…" : "Sincronitzar FECAPA"}</button>
+        <button type="button" className="menu-item" onClick={onViewMatches}>Partits</button>
         <button type="button" className="menu-item" onClick={onShowOverview}>Visió global</button>
       </>}
       <hr />
@@ -705,9 +709,65 @@ function PlanningEditor({ token, teamId, teamName, onClose }: { token: string; t
 
 function CoordinatorPanel({ overview }: { overview: CoordinatorOverview }) {
   return <section className="overview"><div><span className="eyebrow">Coordinació</span><h2>Activitat de tots els equips</h2></div><div className="team-grid">{overview.teams.map((team) => <article key={team.id}><strong>{team.name}</strong><span>{team.category}</span><p>{team.record_count} registres · {team.staff_count} tècnics</p><small>{team.last_activity_at ? `Darrera activitat: ${new Date(team.last_activity_at).toLocaleDateString("ca")}` : "Encara sense activitat"}</small></article>)}</div>{overview.pendingProposals.length > 0 && <div className="proposal-list"><p className="pending">{overview.pendingProposals.length} canvis pendents de confirmació explícita.</p>{overview.pendingProposals.map((proposal) => <article key={proposal.id} className="proposal-card"><p>{proposal.reason}</p><small>{proposal.proposed_by_name} · {new Date(proposal.proposed_at).toLocaleDateString("ca")}</small>{proposal.source_document_id && <div className="source-document">{proposal.source_document_layer && <span className={`layer-badge layer-${proposal.source_document_layer}`}>{proposal.source_document_layer}</span>}{proposal.source_document_drive_url ? <a href={proposal.source_document_drive_url} target="_blank" rel="noreferrer">{proposal.source_document_title}</a> : <strong>{proposal.source_document_title}</strong>}{proposal.source_document_summary && <p className="source-summary">{proposal.source_document_summary}</p>}</div>}</article>)}</div>}
-    {/* JME-53: cross-team roster status — JME-52 owns the per-match editor */}
-    {overview.upcomingMatchRosters.length > 0 && <div className="proposal-list"><p className="pending">Convocatòries dels pròxims partits</p>{overview.upcomingMatchRosters.map((match) => <article key={match.id} className="proposal-card"><p>{match.team_name} · {match.title}</p><small>{new Date(match.starts_at).toLocaleString("ca", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</small><p>{match.roster_count === 0 ? "Sense convocatòria" : `${match.roster_count} convocats${match.guest_count > 0 ? ` (${match.guest_count} d'altres equips)` : ""}`}{match.override_count > 0 && <span className="layer-badge"> · {match.override_count} amb risc de 3h</span>}</p></article>)}</div>}
   </section>;
+}
+
+type MatchSort = "date" | "category" | "coach";
+
+// JME-55: dedicated weekly match dashboard for the coordinator, pulling
+// together is_home (JME-50), match_rosters (JME-51) and owner_id
+// (JME-54) into one row per match across every team. Supersedes the
+// simpler upcomingMatchRosters list that used to live in CoordinatorPanel
+// (JME-53).
+function MatchesOverview({ token, onOpenEvent, onClose }: { token: string; onOpenEvent: (teamId: string, eventId: string) => void; onClose: () => void }) {
+  const [weekOffset, setWeekOffset] = useState(0);
+  const [matches, setMatches] = useState<CoordinatorMatch[] | null>(null);
+  const [sortBy, setSortBy] = useState<MatchSort>("date");
+  const [error, setError] = useState("");
+  const week = useMemo(() => weekBounds(weekOffset), [weekOffset]);
+
+  useEffect(() => {
+    setMatches(null);
+    void api.coordinatorMatches(token, { from: week.from, to: week.to })
+      .then((result) => setMatches(result.matches))
+      .catch(() => setError("No s'han pogut carregar els partits."));
+  }, [token, week.from, week.to]);
+
+  const sorted = useMemo(() => {
+    if (!matches) return [];
+    const collator = new Intl.Collator("ca");
+    const copy = [...matches];
+    if (sortBy === "category") copy.sort((a, b) => collator.compare(a.category_name, b.category_name) || a.starts_at.localeCompare(b.starts_at));
+    else if (sortBy === "coach") copy.sort((a, b) => collator.compare(a.owner_name ?? "", b.owner_name ?? "") || a.starts_at.localeCompare(b.starts_at));
+    else copy.sort((a, b) => a.starts_at.localeCompare(b.starts_at));
+    return copy;
+  }, [matches, sortBy]);
+
+  return <main className="workspace-screen">
+    <header className="ws-header"><button type="button" className="back-btn" aria-label="Enrere" onClick={onClose}>‹</button><div className="ws-title"><strong>Partits — tots els equips</strong><span>{week.label}</span></div></header>
+    <div className="ws-body">
+      <div className="week-nav"><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current - 1)} aria-label="Setmana anterior">‹</button><span>{week.label}</span><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current + 1)} aria-label="Setmana següent">›</button></div>
+      <label>Ordenar per<select value={sortBy} onChange={(evt) => setSortBy(evt.target.value as MatchSort)}>
+        <option value="date">Data</option>
+        <option value="category">Categoria</option>
+        <option value="coach">Entrenador</option>
+      </select></label>
+      {error && <p className="error">{error}</p>}
+      {!matches ? <p>Carregant…</p> : sorted.length === 0 ? <p className="empty">Cap partit aquesta setmana.</p> : <ul className="match-overview-list">
+        {sorted.map((match) => <li key={match.id}><button type="button" className={`match-overview-row ${match.canceled ? "canceled" : ""}`} onClick={() => onOpenEvent(match.team_id, match.id)}>
+          <span className={`home-away-badge ${match.is_home === false ? "away" : match.is_home === true ? "home" : "unknown"}`}>{match.is_home === false ? "Fora" : match.is_home === true ? "Casa" : "?"}</span>
+          <span className="match-overview-main">
+            <strong>{match.team_name}</strong><span className="category-tag">{match.category_name}</span>
+            <span className="match-overview-title">{match.title}</span>
+            <span>{new Date(match.starts_at).toLocaleString("ca", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>
+          </span>
+          <span className="match-overview-coach">{match.owner_name ?? "Sense assignar"}</span>
+          <span className="roster-counts"><span className="count-pill home">{match.home_player_count}</span><span className="count-pill guest">{match.guest_player_count}</span></span>
+          {match.canceled && <em>Cancel·lat</em>}
+        </button></li>)}
+      </ul>}
+    </div>
+  </main>;
 }
 
 type FichaBlockDraft = { description: string; diagramAssetUrl: string; exerciseId: string };
