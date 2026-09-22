@@ -174,19 +174,21 @@ app.get("/v1/teams/:teamId", { onRequest: [async (request) => request.jwtVerify(
   return result.rows[0];
 });
 
-// JME-54: eligible owners for the reassignment picker on this team's
-// events — anyone actually assigned to it, active. Read is open to
-// anyone with team access; only the coordinator can act on it (PATCH
-// .../events/:eventId enforces that separately).
+// JME-54: eligible owners for the reassignment picker — every active
+// coach/coordinator in the club, not just whoever's assigned to this
+// particular team, same as how a match roster can borrow any player
+// from any team. Read is open to anyone with team access; only the
+// coordinator can act on it (PATCH .../events/:eventId enforces that
+// separately).
 app.get("/v1/teams/:teamId/coaches", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
   const allowed = await hasTeamAccess(db, identity.sub, teamId);
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
   const result = await db.query(
-    `SELECT u.id, u.name FROM team_assignments ta JOIN users u ON u.id = ta.user_id
-     WHERE ta.team_id = $1 AND u.active = true ORDER BY u.name`,
-    [teamId],
+    `SELECT u.id, u.name FROM users u
+     WHERE u.active = true AND (u.role = 'coach' OR u.global_access)
+     ORDER BY u.name`,
   );
   return { coaches: result.rows };
 });
