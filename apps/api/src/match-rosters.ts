@@ -128,16 +128,21 @@ export async function copyFromPreviousMatch(
      ORDER BY te.starts_at DESC LIMIT 1`,
     [teamId, targetStartsAt, eventId],
   );
-  if (!previousEvent.rowCount) return { added: [], skipped: [] };
 
-  const previousRoster = await db.query(
-    `SELECT mr.player_id, p.name AS player_name FROM match_rosters mr JOIN players p ON p.id = mr.player_id WHERE mr.team_event_id = $1`,
-    [(previousEvent.rows[0] as { id: string }).id],
-  );
+  // No earlier match has a roster yet — first match of the season, or the
+  // very first roster ever built for this team. Bootstrap from the team's
+  // own active players instead of leaving it empty. Naturally empty for
+  // virtual teams, which have no players of their own (JME-49).
+  const sourcePlayers = previousEvent.rowCount
+    ? await db.query(
+        `SELECT mr.player_id, p.name AS player_name FROM match_rosters mr JOIN players p ON p.id = mr.player_id WHERE mr.team_event_id = $1`,
+        [(previousEvent.rows[0] as { id: string }).id],
+      )
+    : await db.query(`SELECT id AS player_id, name AS player_name FROM players WHERE team_id = $1 AND active = true`, [teamId]);
 
   const added: CopyFromPreviousResult["added"] = [];
   const skipped: CopyFromPreviousResult["skipped"] = [];
-  for (const row of previousRoster.rows as Array<{ player_id: string; player_name: string }>) {
+  for (const row of sourcePlayers.rows as Array<{ player_id: string; player_name: string }>) {
     const result = await addPlayerToRoster(db, eventId, row.player_id, addedBy, false);
     if (result.status === "added") added.push({ playerId: row.player_id, playerName: row.player_name });
     else if (result.status === "blocked" || result.status === "needs_confirmation") skipped.push({ playerName: row.player_name, reason: "conflict" });
