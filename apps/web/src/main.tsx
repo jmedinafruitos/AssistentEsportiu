@@ -66,7 +66,11 @@ function App() {
   }
 
   async function openEvent(eventTeamId: string, eventId: string) {
-    try { setSelectedEvent(await api.eventDetail(token, eventTeamId, eventId)); setViewingMatches(false); }
+    // Deliberately doesn't touch viewingMatches: EventDetail's early
+    // return takes priority over it regardless, so leaving it true when
+    // the match came from "Partits" means closing the event correctly
+    // falls back to that screen instead of the home events list.
+    try { setSelectedEvent(await api.eventDetail(token, eventTeamId, eventId)); }
     catch { setError("No s'ha pogut carregar l'esdeveniment."); }
   }
 
