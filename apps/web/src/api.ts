@@ -76,7 +76,7 @@ export type CoordinatorOverview = {
 // dedicated weekly dashboard (supersedes JME-53's simpler
 // upcomingMatchRosters list).
 export type CoordinatorMatch = {
-  id: string; title: string; starts_at: string; is_home: boolean | null; canceled: boolean;
+  id: string; title: string; starts_at: string; is_home: boolean | null;
   team_id: string; team_name: string; category_name: string;
   owner_id: string | null; owner_name: string | null;
   home_player_count: number; guest_player_count: number;

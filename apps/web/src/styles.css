@@ -45,7 +45,6 @@ input, select, textarea { width: 100%; border: 1px solid #c5d0df; border-radius:
 .events-header .mode-switch { margin: 0; }.owner-row { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: .85rem; color: #33547f; }.owner-row select { width: auto; margin: 0; }
 .match-overview-list { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 8px; }
 .match-overview-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; width: 100%; padding: 12px 14px; border-radius: 14px; text-align: left; background: #fff; box-shadow: 0 2px 10px #173b6d0f; }
-.match-overview-row.canceled { opacity: .55; }
 .home-away-badge { flex-shrink: 0; padding: 3px 9px; border-radius: 999px; color: white; font-size: .68rem; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; background: #5d7593; }
 .home-away-badge.home { background: #28568f; }
 .home-away-badge.away { background: #b5432f; }
