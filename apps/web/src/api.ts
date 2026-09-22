@@ -143,7 +143,13 @@ async function request<T>(path: string, options: RequestInit = {}, token?: strin
     const payload = await response.json().catch(() => ({})) as { message?: string };
     throw new Error(payload.message ?? `HTTP ${response.status}`);
   }
-  return response.json() as Promise<T>;
+  // A 204, or any other empty body, has nothing for .json() to parse —
+  // it throws a SyntaxError that looked like the request itself failed
+  // (e.g. removeFromRoster reporting "couldn't remove" after it removed
+  // the row just fine). Every caller here expects an object back, so {}
+  // is a safe stand-in for "success, no body".
+  const text = await response.text();
+  return (text ? JSON.parse(text) : {}) as T;
 }
 
 export const api = {
