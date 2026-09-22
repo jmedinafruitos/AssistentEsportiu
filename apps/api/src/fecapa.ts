@@ -150,6 +150,12 @@ export async function syncFecapaCalendars(db: Queryable): Promise<FecapaSyncSumm
         const externalRef = `${idc}:${match.homeId}:${match.awayId}:${match.gamedate}`;
         const idA = Math.min(match.homeId, match.awayId);
         const idB = Math.max(match.homeId, match.awayId);
+        // JME-50: first position in FECAPA's own title is the home side —
+        // keyed off the id comparison we already do to resolve `team`
+        // above, not text-matching the club's name (its own A/B/C/D
+        // lettering doesn't always match our team names, e.g. our "Alevín
+        // Bronze" shows up as "HCSENTMENAT B" in FECAPA's text).
+        const isHome = match.homeId === team.fecapa_team_id;
 
         // FECAPA occasionally republishes a match with a shifted date or a
         // swapped home/away side (JME-48) — matching on the exact
@@ -177,18 +183,18 @@ export async function syncFecapaCalendars(db: Queryable): Promise<FecapaSyncSumm
         let row: { id: string; inserted: boolean };
         if (existing.rows.length > 0) {
           const result = await db.query(
-            `UPDATE team_events SET title = $2, starts_at = $3, external_ref = $4, updated_at = now()
+            `UPDATE team_events SET title = $2, starts_at = $3, external_ref = $4, is_home = $5, updated_at = now()
              WHERE id = $1
              RETURNING id, false AS inserted`,
-            [existing.rows[0].id, title, startsAt, externalRef],
+            [existing.rows[0].id, title, startsAt, externalRef, isHome],
           );
           row = result.rows[0] as { id: string; inserted: boolean };
         } else {
           const result = await db.query(
-            `INSERT INTO team_events (team_id, event_type, title, starts_at, source, external_ref)
-             VALUES ($1, 'match', $2, $3, 'fecapa', $4)
+            `INSERT INTO team_events (team_id, event_type, title, starts_at, source, external_ref, is_home)
+             VALUES ($1, 'match', $2, $3, 'fecapa', $4, $5)
              RETURNING id, true AS inserted`,
-            [team.id, title, startsAt, externalRef],
+            [team.id, title, startsAt, externalRef, isHome],
           );
           row = result.rows[0] as { id: string; inserted: boolean };
         }
