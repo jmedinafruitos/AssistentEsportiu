@@ -754,7 +754,7 @@ function MatchesOverview({ token, onOpenEvent, onClose }: { token: string; onOpe
       </select></label>
       {error && <p className="error">{error}</p>}
       {!matches ? <p>Carregant…</p> : sorted.length === 0 ? <p className="empty">Cap partit aquesta setmana.</p> : <ul className="match-overview-list">
-        {sorted.map((match) => <li key={match.id}><button type="button" className={`match-overview-row ${match.canceled ? "canceled" : ""}`} onClick={() => onOpenEvent(match.team_id, match.id)}>
+        {sorted.map((match) => <li key={match.id}><button type="button" className="match-overview-row" onClick={() => onOpenEvent(match.team_id, match.id)}>
           <span className={`home-away-badge ${match.is_home === false ? "away" : match.is_home === true ? "home" : "unknown"}`}>{match.is_home === false ? "Fora" : match.is_home === true ? "Casa" : "?"}</span>
           <span className="match-overview-main">
             <strong>{match.team_name}</strong><span className="category-tag">{match.category_name}</span>
@@ -763,7 +763,6 @@ function MatchesOverview({ token, onOpenEvent, onClose }: { token: string; onOpe
           </span>
           <span className="match-overview-coach">{match.owner_name ?? "Sense assignar"}</span>
           <span className="roster-counts"><span className="count-pill home">{match.home_player_count}</span><span className="count-pill guest">{match.guest_player_count}</span></span>
-          {match.canceled && <em>Cancel·lat</em>}
         </button></li>)}
       </ul>}
     </div>

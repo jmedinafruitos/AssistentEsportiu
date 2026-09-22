@@ -347,7 +347,10 @@ app.get("/v1/coordinator/matches", { onRequest: [async (request) => request.jwtV
     to: z.string().datetime(),
   }).parse(request.query);
   const result = await db.query(
-    `SELECT te.id, te.title, te.starts_at, te.is_home, te.canceled,
+    // canceled = false: this is a forward-looking roster/coaching planning
+    // view, not a historical record — also keeps JME-48's soft-canceled
+    // FECAPA duplicate artifacts (never deleted, only flagged) out of it.
+    `SELECT te.id, te.title, te.starts_at, te.is_home,
             te.team_id, t.name AS team_name, c.name AS category_name,
             te.owner_id, owner.name AS owner_name,
             count(mr.id) FILTER (WHERE p.team_id = te.team_id)::int AS home_player_count,
@@ -358,7 +361,7 @@ app.get("/v1/coordinator/matches", { onRequest: [async (request) => request.jwtV
      LEFT JOIN users owner ON owner.id = te.owner_id
      LEFT JOIN match_rosters mr ON mr.team_event_id = te.id
      LEFT JOIN players p ON p.id = mr.player_id
-     WHERE te.event_type = 'match'
+     WHERE te.event_type = 'match' AND te.canceled = false
        AND te.starts_at >= $1::timestamptz AND te.starts_at < $2::timestamptz
      GROUP BY te.id, t.name, c.name, owner.name
      ORDER BY te.starts_at ASC`,
