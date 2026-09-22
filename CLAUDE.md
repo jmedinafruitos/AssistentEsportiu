@@ -68,12 +68,18 @@ typecheck`, `npm run test:pilot`.
 - Stack: Docker Compose (`docker-compose.preprod.yml`) — servicios `postgres`
   (postgres:16-alpine), `migrations` (corre una vez y sale), `api` (expuesta
   solo en `127.0.0.1:3000`), `web` (expuesta solo en `127.0.0.1:8088`).
-- El proxy existente del servidor apunta a `127.0.0.1:8088`; la API nunca se
-  publica directamente.
-- Directorio de despliegue documentado: `/opt/assistent-esportiu`
-  (`deploy/preprod/README.md`). El remote `origin` apunta a
-  `/home/jordi/assistent-esportiu-preprod`. **No están verificados como la
-  misma ruta** — confirmarlo en el servidor antes de desplegar, no asumir.
+- Exposició pública: **Tailscale Serve** (no nginx — l'únic site nginx actiu
+  al servidor és `eulaliavila`, d'un altre projecte), a
+  `https://jmfsrv.tail86a315.ts.net/` (tailnet-only). Configurat com
+  `/ proxy http://127.0.0.1:8088` (comprovar amb `tailscale serve status`).
+  L'API mai es publica directament.
+- Directori de desplegament real (verificat 2026-09-22, executant `git
+  remote -v` i `git branch -vv` al servidor): `/home/jordi/assistent-esportiu-preprod`,
+  amb `origin` apuntant directament a GitHub
+  (`git@github.com:jmedinafruitos/AssistentEsportiu.git`) i la branca
+  `preprod/assistent-esportiu-2026-09-02` ja checked out. `/opt/assistent-esportiu`,
+  esmentat a `deploy/preprod/README.md`, **no existeix** al servidor — és
+  documentació desactualitzada, no el path real.
 - Actualización:
   ```sh
   git pull --ff-only

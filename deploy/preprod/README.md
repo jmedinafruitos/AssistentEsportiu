@@ -4,10 +4,16 @@ Este directorio reúne únicamente el procedimiento operativo. JMFsrv es un ento
 
 ## Preparación única del servidor
 
-1. Crear un directorio de aplicación privado, por ejemplo `/opt/assistent-esportiu`.
-2. Clonar el repositorio en ese directorio.
-3. Crear `.env` a partir de `.env.example` y definir `POSTGRES_PASSWORD`, `JWT_SECRET` y, cuando se active, la clave de IA.
-4. Configurar el proxy existente del servidor hacia `127.0.0.1:8088`. La API no se publica directamente: permanece en `127.0.0.1:3000`.
+1. Clonar el repositorio en un directorio de aplicación privado. En la
+   instancia actual es `/home/jordi/assistent-esportiu-preprod`, con
+   `origin` apuntando directamente a GitHub — no asumir `/opt/...`, verificar
+   con `git remote -v` en el propio servidor si se reinstala en otro sitio.
+2. Crear `.env` a partir de `.env.example` y definir `POSTGRES_PASSWORD`, `JWT_SECRET` y, cuando se active, la clave de IA.
+3. Publicar `127.0.0.1:8088` hacia fuera. En la instancia actual esto es
+   **Tailscale Serve** (`tailscale serve status` debe mostrar
+   `/ proxy http://127.0.0.1:8088`), no nginx — el único site nginx activo
+   en este servidor pertenece a otro proyecto (`eulaliavila`). La API no se
+   publica directamente: permanece en `127.0.0.1:3000`.
 
 ## Actualización
 
