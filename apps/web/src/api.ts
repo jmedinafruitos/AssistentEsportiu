@@ -71,6 +71,11 @@ export type CoordinatorOverview = {
     source_document_layer: "principios" | "estructura" | "recursos" | null;
     source_document_drive_url: string | null; source_document_summary: string | null;
   }>;
+  // JME-53
+  upcomingMatchRosters: Array<{
+    id: string; team_name: string; title: string; starts_at: string;
+    roster_count: number; guest_count: number; override_count: number;
+  }>;
 };
 export type TeamPlan = { id: string; season: string; version: number; content: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string } };
 export type AssistantResult = { id: string; user_message: string; assistant_message: string; created_at: string; requested_by: string };
@@ -81,9 +86,33 @@ export type EventReadiness = "none" | "in_progress" | "done";
 export type TeamEvent = {
   id: string; event_type: "training" | "match" | "meeting"; title: string;
   starts_at: string; ends_at: string | null; location: string | null; notes: string | null;
+  // JME-50: only meaningful for event_type 'match'. null means unknown
+  // (e.g. an old manually-created match from before this field existed).
+  is_home: boolean | null;
   source: "manual" | "recurring" | "fecapa"; canceled: boolean; created_at: string;
   training_series_id?: string | null; overridden?: boolean; readiness: EventReadiness;
 };
+// JME-49: a player is club data, not a login account — see players table.
+export type Player = {
+  id: string; name: string; team_id: string; team_name: string;
+  birth_year: number | null; is_goalkeeper: boolean; active: boolean;
+};
+// JME-51: structured so the UI can explain a conflict, not just block it.
+export type ConflictDetail = {
+  conflictType: "same_slot" | "away_gap";
+  conflictingMatch: { teamName: string; title: string; startsAt: string; isHome: boolean | null };
+  requiredGapMinutes: number; actualGapMinutes: number;
+};
+export type RosterEntry = {
+  id: string; player_id: string; player_name: string;
+  player_team_id: string; player_team_name: string;
+  is_guest: boolean; conflict_override: boolean; created_at: string;
+};
+export type AddRosterOutcome =
+  | { status: "added"; entry: RosterEntry }
+  | { status: "already_in_roster" }
+  | { status: "blocked"; conflict: ConflictDetail }
+  | { status: "needs_confirmation"; conflict: ConflictDetail };
 export type TrainingSeries = {
   id: string; team_id: string; title: string; weekdays: number[]; time: string;
   duration_minutes: number | null; starts_on: string; ends_on: string; active?: boolean;
@@ -158,13 +187,13 @@ export const api = {
   assistantResults: (token: string, teamId: string) => request<{ results: AssistantResult[] }>(`/v1/teams/${teamId}/assistant-results`, {}, token),
   events: (token: string, teamId: string, week: { from: string; to: string }) =>
     request<{ events: TeamEvent[] }>(`/v1/teams/${teamId}/events?${new URLSearchParams(week)}`, {}, token),
-  createEvent: (token: string, teamId: string, event: { eventType: "training" | "match" | "meeting"; title: string; startsAt: string; endsAt?: string; location?: string; notes?: string }) =>
+  createEvent: (token: string, teamId: string, event: { eventType: "training" | "match" | "meeting"; title: string; startsAt: string; endsAt?: string; location?: string; notes?: string; isHome?: boolean }) =>
     request<{ event: TeamEvent; actions: EventAction[] }>(`/v1/teams/${teamId}/events`, { method: "POST", body: JSON.stringify(event) }, token),
   generateTrainings: (token: string, teamId: string, plan: { title?: string; weekdays: number[]; time: string; durationMinutes?: number; from: string; to: string }) =>
     request<{ created: number; events: TeamEvent[] }>(`/v1/teams/${teamId}/events/generate-trainings`, { method: "POST", body: JSON.stringify(plan) }, token),
   eventDetail: (token: string, teamId: string, eventId: string) =>
     request<{ event: TeamEvent; actions: EventAction[] }>(`/v1/teams/${teamId}/events/${eventId}`, {}, token),
-  updateEvent: (token: string, teamId: string, eventId: string, patch: { title?: string; startsAt?: string; endsAt?: string | null; location?: string | null; notes?: string | null; canceled?: boolean }) =>
+  updateEvent: (token: string, teamId: string, eventId: string, patch: { title?: string; startsAt?: string; endsAt?: string | null; location?: string | null; notes?: string | null; canceled?: boolean; isHome?: boolean | null }) =>
     request<TeamEvent>(`/v1/teams/${teamId}/events/${eventId}`, { method: "PATCH", body: JSON.stringify(patch) }, token),
   addEventAction: (token: string, teamId: string, eventId: string, action: { label: string; content?: Record<string, unknown> }) =>
     request<EventAction>(`/v1/teams/${teamId}/events/${eventId}/actions`, { method: "POST", body: JSON.stringify(action) }, token),
@@ -185,4 +214,35 @@ export const api = {
     time?: string; durationMinutes?: number | null; endsOn?: string;
   }) =>
     request<{ series: TrainingSeries; created: number; events: TeamEvent[] }>(`/v1/teams/${teamId}/training-series/${seriesId}`, { method: "PATCH", body: JSON.stringify(patch) }, token),
+  players: (token: string, params: { teamId?: string; query?: string } = {}) =>
+    request<{ players: Player[] }>(`/v1/players?${new URLSearchParams(params as Record<string, string>)}`, {}, token),
+  createPlayer: (token: string, player: { name: string; teamId: string; birthYear?: number; isGoalkeeper?: boolean; notes?: string }) =>
+    request<Player>("/v1/players", { method: "POST", body: JSON.stringify(player) }, token),
+  updatePlayer: (token: string, playerId: string, patch: { name?: string; teamId?: string; birthYear?: number | null; isGoalkeeper?: boolean; active?: boolean; notes?: string | null }) =>
+    request<Player>(`/v1/players/${playerId}`, { method: "PATCH", body: JSON.stringify(patch) }, token),
+  roster: (token: string, teamId: string, eventId: string) =>
+    request<{ entries: RosterEntry[] }>(`/v1/teams/${teamId}/events/${eventId}/roster`, {}, token),
+  copyRosterFromPrevious: (token: string, teamId: string, eventId: string) =>
+    request<{ added: Array<{ playerId: string; playerName: string }>; skipped: Array<{ playerName: string; reason: string }>; entries: RosterEntry[] }>(
+      `/v1/teams/${teamId}/events/${eventId}/roster/copy-from-previous`, { method: "POST" }, token,
+    ),
+  // Bypasses the generic request() helper: the API answers 409/422 with a
+  // structured `conflict` body on purpose (JME-51), not as an error to
+  // surface generically — the caller needs it to explain itself and offer
+  // the 3h override, not just show "something went wrong".
+  addToRoster: async (token: string, teamId: string, eventId: string, playerId: string, acceptOverride = false): Promise<AddRosterOutcome> => {
+    const response = await fetch(`${API_URL}/v1/teams/${teamId}/events/${eventId}/roster`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ playerId, acceptOverride }),
+    });
+    const payload = await response.json().catch(() => ({})) as { message?: string; conflict?: ConflictDetail } & Partial<RosterEntry>;
+    if (response.status === 201) return { status: "added", entry: payload as unknown as RosterEntry };
+    if (response.status === 422 && payload.conflict) return { status: "blocked", conflict: payload.conflict };
+    if (response.status === 409 && payload.conflict) return { status: "needs_confirmation", conflict: payload.conflict };
+    if (response.status === 409) return { status: "already_in_roster" };
+    throw new Error(payload.message ?? `HTTP ${response.status}`);
+  },
+  removeFromRoster: (token: string, teamId: string, eventId: string, playerId: string) =>
+    request<Record<string, never>>(`/v1/teams/${teamId}/events/${eventId}/roster/${playerId}`, { method: "DELETE" }, token),
 };

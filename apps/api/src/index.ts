@@ -40,6 +40,7 @@ import {
 import { generateTrainingPdf } from "./training-preparation-pdf.js";
 import { generateStrategyProposals } from "./strategy-proposals.js";
 import { materializeEventActions } from "./events.js";
+import { addPlayerToRoster, copyFromPreviousMatch, listRoster } from "./match-rosters.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } from "./training-series.js";
 import { consumeChallenge, pruneExpiredChallenges, resolveRpConfig, storeChallenge } from "./webauthn.js";
@@ -292,7 +293,7 @@ app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwt
   const identity = request.user as { sub: string };
   const actor = await isGlobalAccess(db, identity.sub);
   if (!actor) return reply.code(403).send({ message: "Forbidden" });
-  const [teams, pending] = await Promise.all([
+  const [teams, pending, matchRosters] = await Promise.all([
     db.query(
       `SELECT t.id, t.name, t.season, c.name AS category,
               count(DISTINCT ta.user_id)::int AS staff_count,
@@ -312,8 +313,22 @@ app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwt
        LEFT JOIN source_documents sd ON sd.id = p.source_document_id
        WHERE p.status = 'pending' ORDER BY p.proposed_at DESC`,
     ),
+    // JME-53: roster status per upcoming match, across every team — the
+    // coordinator's cross-team view (JME-52 builds the per-match list).
+    db.query(
+      `SELECT te.id, t.name AS team_name, te.title, te.starts_at,
+              count(mr.id)::int AS roster_count,
+              count(mr.id) FILTER (WHERE p.team_id <> te.team_id)::int AS guest_count,
+              count(mr.id) FILTER (WHERE mr.conflict_override)::int AS override_count
+       FROM team_events te
+       JOIN teams t ON t.id = te.team_id
+       LEFT JOIN match_rosters mr ON mr.team_event_id = te.id
+       LEFT JOIN players p ON p.id = mr.player_id
+       WHERE te.event_type = 'match' AND te.canceled = false AND te.starts_at >= now()
+       GROUP BY te.id, t.name ORDER BY te.starts_at ASC LIMIT 100`,
+    ),
   ]);
-  return { teams: teams.rows, pendingProposals: pending.rows };
+  return { teams: teams.rows, pendingProposals: pending.rows, upcomingMatchRosters: matchRosters.rows };
 });
 
 app.post("/v1/strategy-contexts/:contextId/proposals", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
@@ -524,7 +539,7 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
     // training_preparations.status (JME-44); for match/meeting, which have
     // no AI workflow, it's the completion ratio of the event's own
     // checklist (team_event_actions, JME-29) instead.
-    `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.source, te.canceled, te.created_at,
+    `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.is_home, te.source, te.canceled, te.created_at,
             te.training_series_id, te.overridden,
             CASE
               WHEN te.event_type = 'training' THEN COALESCE((
@@ -562,6 +577,11 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
     endsAt: z.string().datetime().optional(),
     location: z.string().trim().max(200).optional(),
     notes: z.string().trim().max(2_000).optional(),
+    // Only meaningful for event_type 'match' — FECAPA-sourced matches
+    // derive this themselves at sync time (JME-50); a manually-created
+    // match has no opponent-position data to derive it from, so the
+    // creator states it explicitly.
+    isHome: z.boolean().optional(),
   })
     .refine((value) => !value.endsAt || new Date(value.endsAt) > new Date(value.startsAt), { message: "endsAt must be after startsAt" })
     .parse(request.body);
@@ -576,10 +596,10 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
     }
 
     const event = await client.query(
-      `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, location, notes, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at`,
-      [teamId, body.eventType, body.title, body.startsAt, body.endsAt ?? null, body.location ?? null, body.notes ?? null, identity.sub],
+      `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, location, notes, is_home, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at`,
+      [teamId, body.eventType, body.title, body.startsAt, body.endsAt ?? null, body.location ?? null, body.notes ?? null, body.isHome ?? null, identity.sub],
     );
     const created = event.rows[0];
     const actions = await materializeEventActions(client, created.id, teamId, categoryId, body.eventType);
@@ -782,7 +802,7 @@ app.get("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => re
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const event = await db.query(
-    `SELECT id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at,
+    `SELECT id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at,
             training_series_id, overridden
      FROM team_events WHERE id = $1 AND team_id = $2`,
     [eventId, teamId],
@@ -807,6 +827,7 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
     location: z.string().trim().max(200).nullable().optional(),
     notes: z.string().trim().max(2_000).nullable().optional(),
     canceled: z.boolean().optional(),
+    isHome: z.boolean().nullable().optional(),
   }).parse(request.body);
 
   const allowed = await hasTeamAccess(db, identity.sub, teamId);
@@ -823,10 +844,11 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
          location = CASE WHEN $7::boolean THEN $8 ELSE location END,
          notes = CASE WHEN $9::boolean THEN $10 ELSE notes END,
          canceled = COALESCE($11, canceled),
+         is_home = CASE WHEN $12::boolean THEN $13 ELSE is_home END,
          overridden = CASE WHEN training_series_id IS NOT NULL THEN true ELSE overridden END,
          updated_at = now()
      WHERE id = $1 AND team_id = $2
-     RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at,
+     RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at,
                training_series_id, overridden, google_calendar_event_id`,
     [
       eventId, teamId,
@@ -836,6 +858,7 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
       "location" in body, body.location ?? null,
       "notes" in body, body.notes ?? null,
       body.canceled ?? null,
+      "isHome" in body, body.isHome ?? null,
     ],
   );
   if (!result.rowCount) return reply.code(404).send({ message: "Event not found" });
@@ -847,6 +870,130 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
     googleCalendarEventId: updated.google_calendar_event_id,
   }).catch((error) => request.log.error({ err: error, eventId: updated.id }, "Calendar sync failed"));
   return updated;
+});
+
+// JME-51/52: convocatòria (call-up list) for a match. Conflict-check and
+// insert logic lives in match-rosters.ts; these routes are thin glue,
+// same split as training-preparation.ts.
+app.get("/v1/teams/:teamId/events/:eventId/roster", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  return { entries: await listRoster(db, eventId) };
+});
+
+app.post("/v1/teams/:teamId/events/:eventId/roster/copy-from-previous", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  const result = await copyFromPreviousMatch(db, teamId, eventId, identity.sub);
+  return { ...result, entries: await listRoster(db, eventId) };
+});
+
+app.post("/v1/teams/:teamId/events/:eventId/roster", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid() }).parse(request.params);
+  const body = z.object({ playerId: z.string().uuid(), acceptOverride: z.boolean().default(false) }).parse(request.body);
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  const result = await addPlayerToRoster(db, eventId, body.playerId, identity.sub, body.acceptOverride);
+  if (result.status === "already_in_roster") return reply.code(409).send({ message: "El jugador ja és a la convocatòria" });
+  if (result.status === "blocked") return reply.code(422).send({ message: "Conflicte d'horari", conflict: result.conflict });
+  if (result.status === "needs_confirmation") return reply.code(409).send({ message: "Possible conflicte d'horari", conflict: result.conflict });
+  return reply.code(201).send(result.entry);
+});
+
+app.delete("/v1/teams/:teamId/events/:eventId/roster/:playerId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId, eventId, playerId } = z.object({ teamId: z.string().uuid(), eventId: z.string().uuid(), playerId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  await db.query(`DELETE FROM match_rosters WHERE team_event_id = $1 AND player_id = $2`, [eventId, playerId]);
+  return reply.code(204).send();
+});
+
+// JME-49: players are club data (not staff/login accounts) — read is open
+// to any authenticated user, since building a match roster means
+// searching players across every team, not just your own (JME-52).
+app.get("/v1/players", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
+  const query = z.object({
+    teamId: z.string().uuid().optional(),
+    query: z.string().trim().min(1).max(100).optional(),
+  }).parse(request.query);
+  const result = await db.query(
+    `SELECT p.id, p.name, p.team_id, t.name AS team_name, p.birth_year, p.is_goalkeeper, p.active
+     FROM players p JOIN teams t ON t.id = p.team_id
+     WHERE p.active = true
+       AND ($1::uuid IS NULL OR p.team_id = $1)
+       AND ($2::text IS NULL OR p.name ILIKE '%' || $2 || '%')
+     ORDER BY t.name, p.name`,
+    [query.teamId ?? null, query.query ?? null],
+  );
+  return { players: result.rows };
+});
+
+app.post("/v1/players", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const body = z.object({
+    name: z.string().trim().min(1).max(200),
+    teamId: z.string().uuid(),
+    birthYear: z.number().int().min(1950).max(2050).optional(),
+    isGoalkeeper: z.boolean().default(false),
+    notes: z.string().trim().max(2_000).optional(),
+  }).parse(request.body);
+  const allowed = await hasTeamAccess(db, identity.sub, body.teamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `INSERT INTO players (name, team_id, birth_year, is_goalkeeper, notes)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, name, team_id, birth_year, is_goalkeeper, active`,
+    [body.name, body.teamId, body.birthYear ?? null, body.isGoalkeeper, body.notes ?? null],
+  );
+  return reply.code(201).send(result.rows[0]);
+});
+
+app.patch("/v1/players/:playerId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { playerId } = z.object({ playerId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    name: z.string().trim().min(1).max(200).optional(),
+    teamId: z.string().uuid().optional(),
+    birthYear: z.number().int().min(1950).max(2050).nullable().optional(),
+    isGoalkeeper: z.boolean().optional(),
+    active: z.boolean().optional(),
+    notes: z.string().trim().max(2_000).nullable().optional(),
+  }).parse(request.body);
+  const current = await db.query(`SELECT team_id FROM players WHERE id = $1`, [playerId]);
+  if (!current.rowCount) return reply.code(404).send({ message: "Player not found" });
+  const currentTeamId = (current.rows[0] as { team_id: string }).team_id;
+  const allowed = await hasTeamAccess(db, identity.sub, currentTeamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  // Moving a player to a different team is a bigger action than editing
+  // their own record — reserved for the coordinator.
+  if (body.teamId && body.teamId !== currentTeamId && !(await isGlobalAccess(db, identity.sub))) {
+    return reply.code(403).send({ message: "Forbidden" });
+  }
+  const result = await db.query(
+    `UPDATE players
+     SET name = COALESCE($2, name),
+         team_id = COALESCE($3, team_id),
+         birth_year = CASE WHEN $4::boolean THEN $5 ELSE birth_year END,
+         is_goalkeeper = COALESCE($6, is_goalkeeper),
+         active = COALESCE($7, active),
+         notes = CASE WHEN $8::boolean THEN $9 ELSE notes END,
+         updated_at = now()
+     WHERE id = $1
+     RETURNING id, name, team_id, birth_year, is_goalkeeper, active`,
+    [
+      playerId, body.name ?? null, body.teamId ?? null,
+      "birthYear" in body, body.birthYear ?? null,
+      body.isGoalkeeper ?? null, body.active ?? null,
+      "notes" in body, body.notes ?? null,
+    ],
+  );
+  return result.rows[0];
 });
 
 app.post("/v1/teams/:teamId/events/:eventId/actions", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
