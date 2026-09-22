@@ -638,7 +638,8 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
     const event = await client.query(
       `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, location, notes, is_home, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at`,
+       RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at, team_id,
+                 (SELECT name FROM teams WHERE id = $1) AS team_name`,
       [teamId, body.eventType, body.title, body.startsAt, body.endsAt ?? null, body.location ?? null, body.notes ?? null, body.isHome ?? null, identity.sub],
     );
     const created = event.rows[0];
@@ -842,9 +843,10 @@ app.get("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => re
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
 
   const event = await db.query(
-    `SELECT id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at,
-            training_series_id, overridden
-     FROM team_events WHERE id = $1 AND team_id = $2`,
+    `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.is_home, te.source, te.canceled, te.created_at,
+            te.training_series_id, te.overridden, te.team_id, t.name AS team_name
+     FROM team_events te JOIN teams t ON t.id = te.team_id
+     WHERE te.id = $1 AND te.team_id = $2`,
     [eventId, teamId],
   );
   if (!event.rowCount) return reply.code(404).send({ message: "Event not found" });
@@ -877,7 +879,7 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
   // to a series, mark it overridden so a later this-and-following/all edit
   // knows to leave it alone instead of silently resetting this change.
   const result = await db.query(
-    `UPDATE team_events
+    `UPDATE team_events te
      SET title = COALESCE($3, title),
          starts_at = COALESCE($4, starts_at),
          ends_at = CASE WHEN $5::boolean THEN $6 ELSE ends_at END,
@@ -889,7 +891,8 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
          updated_at = now()
      WHERE id = $1 AND team_id = $2
      RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at,
-               training_series_id, overridden, google_calendar_event_id`,
+               training_series_id, overridden, google_calendar_event_id, team_id,
+               (SELECT name FROM teams WHERE id = te.team_id) AS team_name`,
     [
       eventId, teamId,
       body.title ?? null,

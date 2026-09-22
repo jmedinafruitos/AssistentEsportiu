@@ -61,7 +61,8 @@ export async function generateSeriesOccurrences(
     const event = await db.query(
       `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, source, training_series_id, created_by)
        VALUES ($1, 'training', $2, $3, $4, 'recurring', $5, $6)
-       RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at, training_series_id`,
+       RETURNING id, event_type, title, starts_at, ends_at, location, notes, source, canceled, created_at, training_series_id, team_id,
+                 (SELECT name FROM teams WHERE id = $1) AS team_name`,
       [series.team_id, series.title, startsAt.toISOString(), endsAt ? endsAt.toISOString() : null, series.id, createdBy],
     );
     const createdEvent = event.rows[0];
