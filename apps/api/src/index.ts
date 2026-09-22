@@ -954,7 +954,10 @@ app.delete("/v1/teams/:teamId/events/:eventId/roster/:playerId", { onRequest: [a
   const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
   await db.query(`DELETE FROM match_rosters WHERE team_event_id = $1 AND player_id = $2`, [eventId, playerId]);
-  return reply.code(204).send();
+  // Not 204: the frontend's shared request() helper always calls
+  // .json() on the response, which throws on an empty body — same
+  // convention as removeEventAction's DELETE just above.
+  return {};
 });
 
 // JME-49: players are club data (not staff/login accounts) — read is open
