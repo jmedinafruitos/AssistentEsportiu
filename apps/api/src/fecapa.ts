@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 import { Queryable } from "./db.js";
-import { materializeEventActions } from "./events.js";
+import { materializeEventActions, resolveDefaultOwner } from "./events.js";
 
 const FECAPA_BASE = "https://www.server2.sidgad.es/fecapa";
 const SYNC_WEEKDAYS = new Set(["Mon", "Thu"]);
@@ -190,11 +190,14 @@ export async function syncFecapaCalendars(db: Queryable): Promise<FecapaSyncSumm
           );
           row = result.rows[0] as { id: string; inserted: boolean };
         } else {
+          // JME-54: owner_id set only on insert, same rule as notes above —
+          // a resync must never overwrite a coordinator's reassignment.
+          const ownerId = await resolveDefaultOwner(db, team.id);
           const result = await db.query(
-            `INSERT INTO team_events (team_id, event_type, title, starts_at, source, external_ref, is_home)
-             VALUES ($1, 'match', $2, $3, 'fecapa', $4, $5)
+            `INSERT INTO team_events (team_id, event_type, title, starts_at, source, external_ref, is_home, owner_id)
+             VALUES ($1, 'match', $2, $3, 'fecapa', $4, $5, $6)
              RETURNING id, true AS inserted`,
-            [team.id, title, startsAt, externalRef, isHome],
+            [team.id, title, startsAt, externalRef, isHome, ownerId],
           );
           row = result.rows[0] as { id: string; inserted: boolean };
         }

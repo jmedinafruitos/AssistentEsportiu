@@ -39,7 +39,7 @@ import {
 } from "./training-preparation.js";
 import { generateTrainingPdf } from "./training-preparation-pdf.js";
 import { generateStrategyProposals } from "./strategy-proposals.js";
-import { materializeEventActions } from "./events.js";
+import { materializeEventActions, resolveDefaultOwner } from "./events.js";
 import { addPlayerToRoster, copyFromPreviousMatch, listRoster } from "./match-rosters.js";
 import { nextFecapaSyncAt, syncFecapaCalendars } from "./fecapa.js";
 import { archiveFutureOccurrences, generateSeriesOccurrences, TrainingSeries } from "./training-series.js";
@@ -172,6 +172,23 @@ app.get("/v1/teams/:teamId", { onRequest: [async (request) => request.jwtVerify(
   );
   if (!result.rowCount) return reply.code(403).send({ message: "Forbidden" });
   return result.rows[0];
+});
+
+// JME-54: eligible owners for the reassignment picker on this team's
+// events — anyone actually assigned to it, active. Read is open to
+// anyone with team access; only the coordinator can act on it (PATCH
+// .../events/:eventId enforces that separately).
+app.get("/v1/teams/:teamId/coaches", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  const allowed = await hasTeamAccess(db, identity.sub, teamId);
+  if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT u.id, u.name FROM team_assignments ta JOIN users u ON u.id = ta.user_id
+     WHERE ta.team_id = $1 AND u.active = true ORDER BY u.name`,
+    [teamId],
+  );
+  return { coaches: result.rows };
 });
 
 app.get("/v1/strategy-contexts", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
@@ -531,6 +548,10 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
   const query = z.object({
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
+    // JME-54: "Els meus esdeveniments" — cross-cutting filter independent
+    // of team scope, so it lives here as a plain query flag rather than
+    // a separate endpoint.
+    mine: z.coerce.boolean().optional(),
   }).parse(request.query);
   const allowed = await hasTeamAccess(db, identity.sub, teamId);
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
@@ -540,7 +561,7 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
     // no AI workflow, it's the completion ratio of the event's own
     // checklist (team_event_actions, JME-29) instead.
     `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.is_home, te.source, te.canceled, te.created_at,
-            te.training_series_id, te.overridden, te.team_id, t.name AS team_name,
+            te.training_series_id, te.overridden, te.team_id, t.name AS team_name, te.owner_id, owner.name AS owner_name,
             CASE
               WHEN te.event_type = 'training' THEN COALESCE((
                 SELECT CASE WHEN tp.status = 'drafting' THEN 'in_progress' WHEN tp.status IN ('ready', 'sent') THEN 'done' END
@@ -557,12 +578,14 @@ app.get("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jwt
               ), 'none')
             END AS readiness
      FROM team_events te JOIN teams t ON t.id = te.team_id
+     LEFT JOIN users owner ON owner.id = te.owner_id
      WHERE te.team_id = $1
        AND te.archived_at IS NULL
        AND te.starts_at >= COALESCE($2::timestamptz, now() - interval '1 day')
        AND ($3::timestamptz IS NULL OR te.starts_at < $3::timestamptz)
+       AND ($4::boolean IS NOT TRUE OR te.owner_id = $5)
      ORDER BY te.starts_at ASC LIMIT 200`,
-    [teamId, query.from ?? null, query.to ?? null],
+    [teamId, query.from ?? null, query.to ?? null, query.mine ?? null, identity.sub],
   );
   return { events: result.rows };
 });
@@ -575,10 +598,11 @@ app.get("/v1/events", { onRequest: [async (request) => request.jwtVerify()] }, a
   const query = z.object({
     from: z.string().datetime().optional(),
     to: z.string().datetime().optional(),
+    mine: z.coerce.boolean().optional(),
   }).parse(request.query);
   const result = await db.query(
     `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.is_home, te.source, te.canceled, te.created_at,
-            te.training_series_id, te.overridden, te.team_id, t.name AS team_name,
+            te.training_series_id, te.overridden, te.team_id, t.name AS team_name, te.owner_id, owner.name AS owner_name,
             CASE
               WHEN te.event_type = 'training' THEN COALESCE((
                 SELECT CASE WHEN tp.status = 'drafting' THEN 'in_progress' WHEN tp.status IN ('ready', 'sent') THEN 'done' END
@@ -596,13 +620,15 @@ app.get("/v1/events", { onRequest: [async (request) => request.jwtVerify()] }, a
             END AS readiness
      FROM team_events te
      JOIN teams t ON t.id = te.team_id
+     LEFT JOIN users owner ON owner.id = te.owner_id
      JOIN users u ON u.id = $1 AND u.active = true
        AND (u.global_access OR EXISTS (SELECT 1 FROM team_assignments ta WHERE ta.user_id = u.id AND ta.team_id = te.team_id))
      WHERE te.archived_at IS NULL
        AND te.starts_at >= COALESCE($2::timestamptz, now() - interval '1 day')
        AND ($3::timestamptz IS NULL OR te.starts_at < $3::timestamptz)
+       AND ($4::boolean IS NOT TRUE OR te.owner_id = $1)
      ORDER BY te.starts_at ASC LIMIT 200`,
-    [identity.sub, query.from ?? null, query.to ?? null],
+    [identity.sub, query.from ?? null, query.to ?? null, query.mine ?? null],
   );
   return { events: result.rows };
 });
@@ -635,12 +661,14 @@ app.post("/v1/teams/:teamId/events", { onRequest: [async (request) => request.jw
       return reply.code(403).send({ message: "Forbidden" });
     }
 
+    const ownerId = await resolveDefaultOwner(client, teamId);
     const event = await client.query(
-      `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, location, notes, is_home, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-       RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at, team_id,
-                 (SELECT name FROM teams WHERE id = $1) AS team_name`,
-      [teamId, body.eventType, body.title, body.startsAt, body.endsAt ?? null, body.location ?? null, body.notes ?? null, body.isHome ?? null, identity.sub],
+      `INSERT INTO team_events (team_id, event_type, title, starts_at, ends_at, location, notes, is_home, created_by, owner_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at, team_id, owner_id,
+                 (SELECT name FROM teams WHERE id = $1) AS team_name,
+                 (SELECT name FROM users WHERE id = $10) AS owner_name`,
+      [teamId, body.eventType, body.title, body.startsAt, body.endsAt ?? null, body.location ?? null, body.notes ?? null, body.isHome ?? null, identity.sub, ownerId],
     );
     const created = event.rows[0];
     const actions = await materializeEventActions(client, created.id, teamId, categoryId, body.eventType);
@@ -844,8 +872,9 @@ app.get("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => re
 
   const event = await db.query(
     `SELECT te.id, te.event_type, te.title, te.starts_at, te.ends_at, te.location, te.notes, te.is_home, te.source, te.canceled, te.created_at,
-            te.training_series_id, te.overridden, te.team_id, t.name AS team_name
+            te.training_series_id, te.overridden, te.team_id, t.name AS team_name, te.owner_id, owner.name AS owner_name
      FROM team_events te JOIN teams t ON t.id = te.team_id
+     LEFT JOIN users owner ON owner.id = te.owner_id
      WHERE te.id = $1 AND te.team_id = $2`,
     [eventId, teamId],
   );
@@ -870,10 +899,17 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
     notes: z.string().trim().max(2_000).nullable().optional(),
     canceled: z.boolean().optional(),
     isHome: z.boolean().nullable().optional(),
+    // JME-54: reassigning who this event belongs to is a coordinator-only
+    // action — it never changes who can edit the event (still ordinary
+    // team access), just the "whose job is this" label and filter.
+    ownerId: z.string().uuid().nullable().optional(),
   }).parse(request.body);
 
   const allowed = await hasTeamAccess(db, identity.sub, teamId);
   if (!allowed) return reply.code(403).send({ message: "Forbidden" });
+  if ("ownerId" in body && !(await isGlobalAccess(db, identity.sub))) {
+    return reply.code(403).send({ message: "Only the coordinator can reassign an event's owner" });
+  }
 
   // A direct single-event edit is always "only this event" — if it belongs
   // to a series, mark it overridden so a later this-and-following/all edit
@@ -887,12 +923,14 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
          notes = CASE WHEN $9::boolean THEN $10 ELSE notes END,
          canceled = COALESCE($11, canceled),
          is_home = CASE WHEN $12::boolean THEN $13 ELSE is_home END,
+         owner_id = CASE WHEN $14::boolean THEN $15 ELSE owner_id END,
          overridden = CASE WHEN training_series_id IS NOT NULL THEN true ELSE overridden END,
          updated_at = now()
      WHERE id = $1 AND team_id = $2
      RETURNING id, event_type, title, starts_at, ends_at, location, notes, is_home, source, canceled, created_at,
-               training_series_id, overridden, google_calendar_event_id, team_id,
-               (SELECT name FROM teams WHERE id = te.team_id) AS team_name`,
+               training_series_id, overridden, google_calendar_event_id, team_id, owner_id,
+               (SELECT name FROM teams WHERE id = te.team_id) AS team_name,
+               (SELECT name FROM users WHERE id = te.owner_id) AS owner_name`,
     [
       eventId, teamId,
       body.title ?? null,
@@ -902,6 +940,7 @@ app.patch("/v1/teams/:teamId/events/:eventId", { onRequest: [async (request) => 
       "notes" in body, body.notes ?? null,
       body.canceled ?? null,
       "isHome" in body, body.isHome ?? null,
+      "ownerId" in body, body.ownerId ?? null,
     ],
   );
   if (!result.rowCount) return reply.code(404).send({ message: "Event not found" });
