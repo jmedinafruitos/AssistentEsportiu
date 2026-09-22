@@ -71,11 +71,15 @@ export type CoordinatorOverview = {
     source_document_layer: "principios" | "estructura" | "recursos" | null;
     source_document_drive_url: string | null; source_document_summary: string | null;
   }>;
-  // JME-53
-  upcomingMatchRosters: Array<{
-    id: string; team_name: string; title: string; starts_at: string;
-    roster_count: number; guest_count: number; override_count: number;
-  }>;
+};
+// JME-55: one row per match, across every team — the coordinator's
+// dedicated weekly dashboard (supersedes JME-53's simpler
+// upcomingMatchRosters list).
+export type CoordinatorMatch = {
+  id: string; title: string; starts_at: string; is_home: boolean | null; canceled: boolean;
+  team_id: string; team_name: string; category_name: string;
+  owner_id: string | null; owner_name: string | null;
+  home_player_count: number; guest_player_count: number;
 };
 export type TeamPlan = { id: string; season: string; version: number; content: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string } };
 export type AssistantResult = { id: string; user_message: string; assistant_message: string; created_at: string; requested_by: string };
@@ -201,6 +205,8 @@ export const api = {
   sendPreparation: (token: string, teamId: string, eventId: string) =>
     request<{ id: string; status: string; sent_at: string; recipients: string[] }>(`/v1/teams/${teamId}/events/${eventId}/preparation/send`, { method: "POST" }, token),
   coordinatorOverview: (token: string) => request<CoordinatorOverview>("/v1/coordinator/overview", {}, token),
+  coordinatorMatches: (token: string, week: { from: string; to: string }) =>
+    request<{ matches: CoordinatorMatch[] }>(`/v1/coordinator/matches?${new URLSearchParams(week)}`, {}, token),
   plan: (token: string, teamId: string) => request<{ plan: TeamPlan | null }>(`/v1/teams/${teamId}/plan`, {}, token),
   savePlan: (token: string, teamId: string, plan: { seasonObjectives: string[]; nextTrainingObjectives: string[]; notes: string; version?: number }) => request<TeamPlan>(`/v1/teams/${teamId}/plan`, { method: "PUT", body: JSON.stringify(plan) }, token),
   assistantResults: (token: string, teamId: string) => request<{ results: AssistantResult[] }>(`/v1/teams/${teamId}/assistant-results`, {}, token),

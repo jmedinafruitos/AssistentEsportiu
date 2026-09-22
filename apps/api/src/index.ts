@@ -310,7 +310,7 @@ app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwt
   const identity = request.user as { sub: string };
   const actor = await isGlobalAccess(db, identity.sub);
   if (!actor) return reply.code(403).send({ message: "Forbidden" });
-  const [teams, pending, matchRosters] = await Promise.all([
+  const [teams, pending] = await Promise.all([
     db.query(
       `SELECT t.id, t.name, t.season, c.name AS category,
               count(DISTINCT ta.user_id)::int AS staff_count,
@@ -330,22 +330,41 @@ app.get("/v1/coordinator/overview", { onRequest: [async (request) => request.jwt
        LEFT JOIN source_documents sd ON sd.id = p.source_document_id
        WHERE p.status = 'pending' ORDER BY p.proposed_at DESC`,
     ),
-    // JME-53: roster status per upcoming match, across every team — the
-    // coordinator's cross-team view (JME-52 builds the per-match list).
-    db.query(
-      `SELECT te.id, t.name AS team_name, te.title, te.starts_at,
-              count(mr.id)::int AS roster_count,
-              count(mr.id) FILTER (WHERE p.team_id <> te.team_id)::int AS guest_count,
-              count(mr.id) FILTER (WHERE mr.conflict_override)::int AS override_count
-       FROM team_events te
-       JOIN teams t ON t.id = te.team_id
-       LEFT JOIN match_rosters mr ON mr.team_event_id = te.id
-       LEFT JOIN players p ON p.id = mr.player_id
-       WHERE te.event_type = 'match' AND te.canceled = false AND te.starts_at >= now()
-       GROUP BY te.id, t.name ORDER BY te.starts_at ASC LIMIT 100`,
-    ),
   ]);
-  return { teams: teams.rows, pendingProposals: pending.rows, upcomingMatchRosters: matchRosters.rows };
+  return { teams: teams.rows, pendingProposals: pending.rows };
+});
+
+// JME-55: dedicated weekly match dashboard for the coordinator — pulls
+// together is_home (JME-50), match_rosters (JME-51) and owner_id
+// (JME-54) into one row per match, across every team. Superseded
+// JME-53's simpler upcomingMatchRosters list in /coordinator/overview.
+app.get("/v1/coordinator/matches", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const actor = await isGlobalAccess(db, identity.sub);
+  if (!actor) return reply.code(403).send({ message: "Forbidden" });
+  const query = z.object({
+    from: z.string().datetime(),
+    to: z.string().datetime(),
+  }).parse(request.query);
+  const result = await db.query(
+    `SELECT te.id, te.title, te.starts_at, te.is_home, te.canceled,
+            te.team_id, t.name AS team_name, c.name AS category_name,
+            te.owner_id, owner.name AS owner_name,
+            count(mr.id) FILTER (WHERE p.team_id = te.team_id)::int AS home_player_count,
+            count(mr.id) FILTER (WHERE p.team_id <> te.team_id)::int AS guest_player_count
+     FROM team_events te
+     JOIN teams t ON t.id = te.team_id
+     JOIN categories c ON c.id = t.category_id
+     LEFT JOIN users owner ON owner.id = te.owner_id
+     LEFT JOIN match_rosters mr ON mr.team_event_id = te.id
+     LEFT JOIN players p ON p.id = mr.player_id
+     WHERE te.event_type = 'match'
+       AND te.starts_at >= $1::timestamptz AND te.starts_at < $2::timestamptz
+     GROUP BY te.id, t.name, c.name, owner.name
+     ORDER BY te.starts_at ASC`,
+    [query.from, query.to],
+  );
+  return { matches: result.rows };
 });
 
 app.post("/v1/strategy-contexts/:contextId/proposals", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
