@@ -70,6 +70,11 @@ const env = z.object({
   GOOGLE_CALENDAR_ID: z.string().min(1).optional(),
   RESEND_API_KEY: z.string().min(1).optional(),
   RESEND_FROM_EMAIL: z.string().email().optional(),
+  // JME-56: fixed, shared temporary password used for onboarding — the
+  // coordinator resets a user onto this value, and /v1/session/password
+  // forces them off it on first login. Optional so the reset endpoint can
+  // fail clearly (501) instead of the whole API refusing to boot.
+  TEMP_LOGIN_PASSWORD: z.string().min(1).optional(),
 }).parse(process.env);
 
 const app = Fastify({ logger: true });
@@ -120,7 +125,7 @@ app.get("/health", async () => {
 app.get("/v1/me", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
   const identity = request.user as { sub: string };
   const result = await db.query(
-    `SELECT u.id, u.name, u.email, u.role, u.sport_role, u.global_access,
+    `SELECT u.id, u.name, u.email, u.role, u.sport_role, u.global_access, u.must_change_password,
        COALESCE((
          SELECT json_agg(json_build_object('id', t.id, 'name', t.name, 'season', t.season) ORDER BY t.name)
          FROM teams t
@@ -135,6 +140,35 @@ app.get("/v1/me", { onRequest: [async (request) => request.jwtVerify()] }, async
   );
   if (!result.rowCount) return replyNotFound();
   return result.rows[0];
+});
+
+// JME-56: coordinator-only user list, just enough to pick who to reset a
+// temporary password for — not a general user-management screen.
+app.get("/v1/users", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  if (!(await isGlobalAccess(db, identity.sub))) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT id, name, email, role, must_change_password FROM users WHERE active = true ORDER BY name`,
+  );
+  return { users: result.rows };
+});
+
+// JME-56: resets a user onto the club-wide temporary password and flags
+// must_change_password so /v1/session/password forces them off it on
+// their next login. Intentionally not a "create user" endpoint — the
+// user row must already exist.
+app.post("/v1/users/:id/reset-password", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  if (!(await isGlobalAccess(db, identity.sub))) return reply.code(403).send({ message: "Forbidden" });
+  if (!env.TEMP_LOGIN_PASSWORD) return reply.code(501).send({ message: "Temporary password not configured" });
+  const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+  const hash = await bcrypt.hash(env.TEMP_LOGIN_PASSWORD, 10);
+  const result = await db.query(
+    `UPDATE users SET password_hash = $1, must_change_password = true WHERE id = $2 AND active = true RETURNING id`,
+    [hash, id],
+  );
+  if (!result.rowCount) return replyNotFound();
+  return { ok: true };
 });
 
 const replyNotFound = () => ({ message: "User not found" });
@@ -1886,6 +1920,21 @@ app.post("/v1/session", {
     return reply.code(401).send({ message: "Unauthorized" });
   }
   return { token: app.jwt.sign({ sub: user.id, role: user.role }, { expiresIn: "72h" }) };
+});
+
+// JME-56: any authenticated user changes their own password — used both
+// for the forced first-login change off the temporary password, and
+// (incidentally) as a general change-password capability. A valid JWT is
+// proof enough of the current password; no re-entry required.
+app.post("/v1/session/password", { onRequest: [async (request) => request.jwtVerify()] }, async (request) => {
+  const identity = request.user as { sub: string };
+  const body = z.object({ newPassword: z.string().min(8) }).parse(request.body);
+  const hash = await bcrypt.hash(body.newPassword, 10);
+  await db.query(
+    "UPDATE users SET password_hash = $1, must_change_password = false WHERE id = $2",
+    [hash, identity.sub],
+  );
+  return { ok: true };
 });
 
 app.post("/v1/fecapa/sync", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
