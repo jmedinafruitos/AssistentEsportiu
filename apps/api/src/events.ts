@@ -1,5 +1,20 @@
 import { Queryable } from "./db.js";
 
+// JME-54: default owner for a newly-created event — the earliest-assigned
+// active coach on the team (team_assignments.created_at, name as
+// tie-break for the pre-existing rows that all share the same backfill
+// timestamp). Returns null for a team with no active assigned coach
+// (owner_id is nullable for exactly this case).
+export async function resolveDefaultOwner(client: Queryable, teamId: string): Promise<string | null> {
+  const result = await client.query(
+    `SELECT u.id FROM team_assignments ta JOIN users u ON u.id = ta.user_id
+     WHERE ta.team_id = $1 AND u.active = true
+     ORDER BY ta.created_at ASC, u.name ASC LIMIT 1`,
+    [teamId],
+  );
+  return result.rowCount ? (result.rows[0] as { id: string }).id : null;
+}
+
 // Seeds a new event's checklist from the most specific active
 // event_type_actions template (team beats category beats club — exclusive,
 // not additive, since a single event shouldn't stack three scopes at once).
