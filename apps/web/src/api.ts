@@ -8,7 +8,13 @@ export type CurrentUser = {
   id: string; name: string; email: string;
   role: "club_admin" | "coordinator" | "coach";
   sport_role: string | null; global_access: boolean; teams: Team[];
+  // JME-56: true while the user is still on the club-wide temporary
+  // password and hasn't set their own yet.
+  must_change_password: boolean;
 };
+// JME-56: just enough to list users for the "reset temporary password"
+// action — not a general user-management shape.
+export type ManagedUser = { id: string; name: string; email: string; role: "club_admin" | "coordinator" | "coach"; must_change_password: boolean };
 export type ChatMessage = { id: string; role: "user" | "assistant"; content: string };
 // Training's shape matches docs/ficha-entreno-schema.md (JME-42); match is
 // unchanged from JME-10. Activation fields are per-phase free text, not
@@ -175,6 +181,11 @@ export const api = {
   webauthnLoginVerify: (email: string, response: AuthenticationResponseJSON) =>
     request<{ token: string }>("/v1/webauthn/login/verify", { method: "POST", body: JSON.stringify({ email, response }) }),
   me: (token: string) => request<CurrentUser>("/v1/me", {}, token),
+  changePassword: (token: string, newPassword: string) =>
+    request<{ ok: true }>("/v1/session/password", { method: "POST", body: JSON.stringify({ newPassword }) }, token),
+  users: (token: string) => request<{ users: ManagedUser[] }>("/v1/users", {}, token),
+  resetPassword: (token: string, userId: string) =>
+    request<{ ok: true }>(`/v1/users/${userId}/reset-password`, { method: "POST" }, token),
   teams: (token: string) => request<{ teams: Team[] }>("/v1/teams", {}, token),
   chat: (token: string, teamId: string, message: string, history: ChatMessage[]) =>
     request<{ id: string; content: string; createdAt: string }>("/v1/chat", {
