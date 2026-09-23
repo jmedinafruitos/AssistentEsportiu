@@ -127,7 +127,7 @@ function App() {
       <div className="brand"><img className="club-logo compact" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" /><div><p className="club">HOQUEI CLUB SENTMENAT</p><h1>Assistent Esportiu</h1></div></div>
       <button type="button" className="menu-btn" aria-label="Menú" onClick={() => setMenuOpen(true)}><svg width="18" height="14" viewBox="0 0 18 14" fill="none" stroke="#173b6d" strokeWidth="2" strokeLinecap="round"><path d="M1 1h16M1 7h16M1 13h16" /></svg></button>
     </header>
-    {(activeTeam || teamId === ALL_TEAMS) && <p className="team-pill-row"><span className="team-pill">{teamId === ALL_TEAMS ? "Tots els equips" : `${activeTeam!.name} · ${activeTeam!.season}`}</span></p>}
+    {(activeTeam || teamId === ALL_TEAMS) && <p className="team-pill-row"><select className="team-pill" aria-label="Equip actiu" value={teamId} onChange={(event) => { setTeamId(event.target.value); setWeekOffset(0); }}>{teams.length > 1 && <option value={ALL_TEAMS}>Tots els equips</option>}{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></p>}
     <section className="events">
       <div className="events-header"><h2>Esdeveniments</h2><div className="dialog-actions mode-switch"><button type="button" className={mineOnly ? "" : "quiet"} onClick={() => setMineOnly(true)}>Meus</button><button type="button" className={mineOnly ? "quiet" : ""} onClick={() => setMineOnly(false)}>Tots</button></div></div>
       <div className="week-nav"><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current - 1)} aria-label="Setmana anterior">‹</button><span>{week.label}</span><button type="button" className="quiet" onClick={() => setWeekOffset((current) => current + 1)} aria-label="Setmana següent">›</button></div>
@@ -140,10 +140,9 @@ function App() {
     </section>
     {overview && <CoordinatorPanel overview={overview} />}
     {menuOpen && <HamburgerMenu
-      user={user} teams={teams} teamId={teamId} syncingFecapa={syncingFecapa}
+      user={user} syncingFecapa={syncingFecapa}
       canUsePasskeys={canUsePasskeys} activatingPasskey={activatingPasskey}
       onClose={() => setMenuOpen(false)}
-      onSelectTeam={(id) => { setTeamId(id); setWeekOffset(0); setMenuOpen(false); }}
       onAddEvent={() => { setCreatingEvent(true); setMenuOpen(false); }}
       onRecordActivity={() => { setRecording(true); setMenuOpen(false); }}
       onPlanning={() => { setPlanning(true); setMenuOpen(false); }}
@@ -170,20 +169,19 @@ function App() {
 }
 
 // JME-46: secondary/occasional actions live here now instead of scattered
-// across the header and a chat-suggestions bar that no longer exists —
-// team switch, add event, the two things that used to be chat-suggestion
-// buttons (record activity, planning), and the coordinator-only actions.
-function HamburgerMenu({ user, teams, teamId, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onSelectTeam, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onLogout }: {
-  user: CurrentUser; teams: Team[]; teamId: string; syncingFecapa: boolean; canUsePasskeys: boolean; activatingPasskey: boolean;
-  onClose: () => void; onSelectTeam: (teamId: string) => void; onAddEvent: () => void;
+// across the header and a chat-suggestions bar that no longer exists — add
+// event, the two things that used to be chat-suggestion buttons (record
+// activity, planning), and the coordinator-only actions. Team switching
+// moved to the header pill, so it no longer lives here.
+function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onLogout }: {
+  user: CurrentUser; syncingFecapa: boolean; canUsePasskeys: boolean; activatingPasskey: boolean;
+  onClose: () => void; onAddEvent: () => void;
   onRecordActivity: () => void; onPlanning: () => void; onManagePlayers: () => void; onManageTemplates: () => void;
   onSyncFecapa: () => void; onActivatePasskey: () => void; onViewMatches: () => void; onShowOverview: () => void; onLogout: () => void;
 }) {
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <aside className="drawer" role="dialog" aria-modal="true" aria-label="Menú" onClick={(event) => event.stopPropagation()}>
       <div className="drawer-head"><strong>Menú</strong><button type="button" className="close-btn" aria-label="Tanca" onClick={onClose}>×</button></div>
-      <label>Equip actiu<select value={teamId} onChange={(event) => onSelectTeam(event.target.value)}>{teams.length > 1 && <option value={ALL_TEAMS}>Tots els equips</option>}{teams.map((team) => <option key={team.id} value={team.id}>{team.name} · {team.season}</option>)}</select></label>
-      <hr />
       <button type="button" className="menu-item" onClick={onAddEvent}>Afegir esdeveniment</button>
       <button type="button" className="menu-item" onClick={onRecordActivity}>Registrar activitat</button>
       <button type="button" className="menu-item" onClick={onPlanning}>Planificació</button>
