@@ -1,5 +1,5 @@
 import { PDFDocument, PDFFont, rgb, StandardFonts } from "pdf-lib";
-import { ACTIVATION_LABELS, ACTIVATION_PHASES, TrainingContent } from "./training-preparation.js";
+import { TrainingContent } from "./training-preparation.js";
 
 const PAGE_WIDTH = 595.28; // A4 at 72dpi
 const PAGE_HEIGHT = 841.89;
@@ -25,11 +25,20 @@ function wrapText(font: PDFFont, text: string, size: number, maxWidth: number): 
   return lines;
 }
 
-// One hand-laid-out A4 page matching docs/ficha-entreno-schema.md's fields —
-// no diagram image embedding (see JME-44's scope notes), just a text link.
+// "17.30" style, matching the paper fitxa's clock-time strip — not
+// "17:30", that's a deliberate house-style dot per the paper template.
+function formatClock(date: Date): string {
+  return `${String(date.getHours()).padStart(2, "0")}.${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+// One hand-laid-out A4 page (JME-60) matching the real paper fitxa: a
+// clock-time schedule strip, then one numbered section per block —
+// "stations"/"match" blocks list their parallel items as N.1/N.2 —
+// then "Què observar" and a closing note. No diagram image embedding
+// (see JME-44's scope notes), just a text link where present.
 export async function generateTrainingPdf(
   teamName: string,
-  eventDate: string,
+  eventStartsAt: string,
   content: TrainingContent,
   exerciseNames: Map<string, string>,
 ): Promise<Buffer> {
@@ -47,22 +56,40 @@ export async function generateTrainingPdf(
     }
   }
 
+  const startsAt = new Date(eventStartsAt);
+  const eventDate = startsAt.toLocaleDateString("ca", { weekday: "long", day: "numeric", month: "long" });
+
   draw(`${teamName} — Sessió ${content.sessionNumber ?? "?"}`, { size: 18, useBold: true });
   draw(`${eventDate}${content.coach ? ` · ${content.coach}` : ""}`, { size: 11, gapBefore: 4 });
   if (content.notes) draw(content.notes, { gapBefore: 8 });
 
-  const activationLines = ACTIVATION_PHASES.filter((phase) => content.activation[phase]);
-  if (activationLines.length) {
-    draw("Activació", { size: 14, useBold: true, gapBefore: 16 });
-    for (const phase of activationLines) draw(`${ACTIVATION_LABELS[phase]}: ${content.activation[phase]}`, { gapBefore: 4 });
+  draw("Franja horària", { size: 14, useBold: true, gapBefore: 16 });
+  let clock = new Date(startsAt);
+  for (const block of content.scheduleBlocks) {
+    draw(`${formatClock(clock)} · ${block.label} · ${block.durationMinutes}'`, { gapBefore: 4 });
+    clock = new Date(clock.getTime() + block.durationMinutes * 60_000);
   }
 
-  draw("Blocs", { size: 14, useBold: true, gapBefore: 16 });
-  content.blocks.forEach((block, index) => {
-    const exerciseName = block.exerciseId ? exerciseNames.get(block.exerciseId) : undefined;
-    draw(`${index + 1}. ${block.description}${exerciseName ? ` (${exerciseName})` : ""}`, { gapBefore: 6 });
-    if (block.diagramAssetUrl) draw(`Diagrama: ${block.diagramAssetUrl}`, { size: 9, gapBefore: 2 });
+  content.scheduleBlocks.forEach((block, blockIndex) => {
+    const blockNumber = blockIndex + 1;
+    draw(`${blockNumber}. ${block.label.toUpperCase()}`, { size: 14, useBold: true, gapBefore: 18 });
+    block.items.forEach((item, itemIndex) => {
+      const label = block.items.length > 1 ? `${blockNumber}.${itemIndex + 1}` : `${blockNumber}.`;
+      const exerciseName = item.exerciseId ? exerciseNames.get(item.exerciseId) : undefined;
+      draw(`${label} ${item.title}${exerciseName ? ` (${exerciseName})` : ""} — ${item.durationMinutes}'`, { gapBefore: 6, useBold: block.items.length > 1 });
+      if (item.detail) draw(item.detail, { size: 10, gapBefore: 2 });
+    });
   });
+
+  if (content.whatToObserve.length) {
+    draw("Què observar", { size: 14, useBold: true, gapBefore: 18 });
+    for (const point of content.whatToObserve) draw(`• ${point}`, { gapBefore: 3 });
+  }
+
+  if (content.closingNotes) {
+    draw("Tancament", { size: 14, useBold: true, gapBefore: 18 });
+    draw(content.closingNotes, { gapBefore: 4 });
+  }
 
   return Buffer.from(await doc.save());
 }

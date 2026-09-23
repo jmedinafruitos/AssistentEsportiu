@@ -1,5 +1,13 @@
 # Esquema de periodització (capa 2) — dins de `strategy_contexts.content` (JME-40)
 
+> **Nota (JME-57/59):** `progression` (sessió → content_taxonomy →
+> status) segueix llegint-se (és un pla estàtic), però el prompt de la
+> IA ara prioritza la cobertura *real* derivada de `team_records`
+> (`apps/api/src/content-coverage.ts`, contra el nou catàleg
+> `content_taxonomy`) per sobre d'aquest pla — vegeu `contextPrompt` a
+> `apps/api/src/training-preparation.ts`. `trimesters` i `weekly_grid`
+> segueixen vius i sense canvis.
+
 Sense migració d'esquema — `content` ja és `JSONB` (migracions 001/002).
 Aquest document fixa el següent nivell de detall que sí existeix als
 documents reals de Drive (*Ejemplo estructura pre-benjamin.pdf*,

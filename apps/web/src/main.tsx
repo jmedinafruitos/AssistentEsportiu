@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, ConflictDetail, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, ManagedUser, Player, RecordInput, RefineAction, RosterEntry, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { api, Category, ConflictDetail, ContentTaxonomyNode, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, ManagedUser, Player, RecordInput, RefineAction, RosterEntry, SCHEDULE_KIND_LABELS, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
 import { loginWithPasskey, passkeysAvailable, registerPasskey } from "./webauthn";
 import "./styles.css";
 
@@ -40,6 +40,7 @@ function App() {
   const [mineOnly, setMineOnly] = useState(false);
   const [viewingMatches, setViewingMatches] = useState(false);
   const [managingUsers, setManagingUsers] = useState(false);
+  const [managingContentTaxonomy, setManagingContentTaxonomy] = useState(false);
   // JME-56: shown once right after a forced password change, never on a
   // later login — not persisted, purely a same-session sequencing flag.
   const [passkeyOfferPending, setPasskeyOfferPending] = useState(false);
@@ -165,6 +166,7 @@ function App() {
       onActivatePasskey={() => void activatePasskey()}
       onViewMatches={() => { setViewingMatches(true); setMenuOpen(false); }}
       onManageUsers={() => { setManagingUsers(true); setMenuOpen(false); }}
+      onManageContentTaxonomy={() => { setManagingContentTaxonomy(true); setMenuOpen(false); }}
       onShowOverview={() => {
         setMenuOpen(false);
         if (overview) setOverview(null);
@@ -172,12 +174,13 @@ function App() {
       }}
       onLogout={() => { setMenuOpen(false); logout(); }}
     />}
-    {recording && <RecordCapture teamName={actionTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, actionTeamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
+    {recording && <RecordCapture teamId={actionTeamId} teamName={actionTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, actionTeamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
     {planning && <PlanningEditor token={token} teamId={actionTeamId} teamName={actionTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
     {managingPlayers && <PlayersEditor token={token} teams={teams} teamId={actionTeamId} onClose={() => setManagingPlayers(false)} />}
     {creatingEvent && <EventEditor token={token} teamId={actionTeamId} onClose={() => setCreatingEvent(false)} onSaved={() => { setCreatingEvent(false); void refreshEvents(); }} />}
     {managingTemplates && <ActionTemplatesEditor token={token} teams={teams} onClose={() => setManagingTemplates(false)} />}
     {managingUsers && <ManageUsers token={token} onClose={() => setManagingUsers(false)} />}
+    {managingContentTaxonomy && <ManageContentTaxonomy token={token} onClose={() => setManagingContentTaxonomy(false)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
   </main>;
@@ -188,11 +191,11 @@ function App() {
 // event, the two things that used to be chat-suggestion buttons (record
 // activity, planning), and the coordinator-only actions. Team switching
 // moved to the header pill, so it no longer lives here.
-function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onManageUsers, onLogout }: {
+function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onManageUsers, onManageContentTaxonomy, onLogout }: {
   user: CurrentUser; syncingFecapa: boolean; canUsePasskeys: boolean; activatingPasskey: boolean;
   onClose: () => void; onAddEvent: () => void;
   onRecordActivity: () => void; onPlanning: () => void; onManagePlayers: () => void; onManageTemplates: () => void;
-  onSyncFecapa: () => void; onActivatePasskey: () => void; onViewMatches: () => void; onShowOverview: () => void; onManageUsers: () => void; onLogout: () => void;
+  onSyncFecapa: () => void; onActivatePasskey: () => void; onViewMatches: () => void; onShowOverview: () => void; onManageUsers: () => void; onManageContentTaxonomy: () => void; onLogout: () => void;
 }) {
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <aside className="drawer" role="dialog" aria-modal="true" aria-label="Menú" onClick={(event) => event.stopPropagation()}>
@@ -209,6 +212,7 @@ function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey,
         <button type="button" className="menu-item" onClick={onViewMatches}>Partits</button>
         <button type="button" className="menu-item" onClick={onShowOverview}>Visió global</button>
         <button type="button" className="menu-item" onClick={onManageUsers}>Usuaris</button>
+        <button type="button" className="menu-item" onClick={onManageContentTaxonomy}>Continguts</button>
       </>}
       <hr />
       <button type="button" className="menu-item danger" onClick={onLogout}>Sortir</button>
@@ -284,6 +288,49 @@ function ManageUsers({ token, onClose }: { token: string; onClose: () => void })
       <button type="button" className="text-action" disabled={resettingId === user.id} onClick={() => void resetPassword(user)}>{resettingId === user.id ? "Restablint…" : "Restableix contrasenya temporal"}</button>
     </li>)}</ul>
     <div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Tancar</button></div>
+  </section></div>;
+}
+
+// JME-57: coordinator-only. One category's content catalog at a time —
+// a free-depth tree (block > subblock > ...), shown flat with indent by
+// depth. New nodes only (no edit/delete yet — this is the starting
+// catalog for Prebenjamí/Benjamí, deliberately small, expanded here).
+function ManageContentTaxonomy({ token, onClose }: { token: string; onClose: () => void }) {
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [categoryId, setCategoryId] = useState("");
+  const [nodes, setNodes] = useState<ContentTaxonomyNode[]>([]);
+  const [parentId, setParentId] = useState("");
+  const [code, setCode] = useState("");
+  const [label, setLabel] = useState("");
+  const [exampleText, setExampleText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { void api.categories(token).then((result) => { setCategories(result.categories); setCategoryId((current) => current || result.categories[0]?.id || ""); }).catch(() => setError("No s'han pogut carregar les categories.")); }, [token]);
+  useEffect(() => { if (categoryId) void api.contentTaxonomyForCategory(token, categoryId).then((result) => setNodes(result.nodes)).catch(() => setError("No s'ha pogut carregar el catàleg.")); }, [token, categoryId]);
+  const flat = useMemo(() => flattenTaxonomy(nodes), [nodes]);
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setSaving(true); setError("");
+    try {
+      const created = await api.createContentTaxonomyNode(token, categoryId, { parentId: parentId || undefined, code, label, exampleText: exampleText || undefined });
+      setNodes((current) => [...current, created]);
+      setCode(""); setLabel(""); setExampleText("");
+    } catch { setError("No s'ha pogut desar el node."); }
+    finally { setSaving(false); }
+  }
+  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true">
+    <h2>Continguts</h2>
+    <label>Categoria<select value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+    {error && <p className="error">{error}</p>}
+    <ul className="template-list">{flat.map((node) => <li key={node.id}>
+      <strong>{"— ".repeat(node.depth)}{node.code}</strong><span>{node.label}</span>{node.example_text && <em>{node.example_text}</em>}
+    </li>)}</ul>
+    <form onSubmit={submit}>
+      <label>Node pare (opcional, per crear un subbloc)<select value={parentId} onChange={(event) => setParentId(event.target.value)}><option value="">— Arrel (bloc nou) —</option>{flat.map((node) => <option key={node.id} value={node.id}>{"— ".repeat(node.depth)}{node.code} {node.label}</option>)}</select></label>
+      <label>Codi (ex: 1.3)<input required value={code} onChange={(event) => setCode(event.target.value)} /></label>
+      <label>Nom<input required value={label} onChange={(event) => setLabel(event.target.value)} /></label>
+      <label>Exemple (opcional)<input value={exampleText} onChange={(event) => setExampleText(event.target.value)} /></label>
+      <div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Tancar</button><button disabled={saving || !categoryId}>{saving ? "Desant…" : "Afegir"}</button></div>
+    </form>
   </section></div>;
 }
 
@@ -559,13 +606,12 @@ function EventEditor({ token, teamId, onClose, onSaved }: { token: string; teamI
   </section></div>;
 }
 
-const PHASE_QUICK_OPTIONS = ["Escurça-ho", "Allarga-ho", "Canvia l'enfocament"];
-const BLOCK_QUICK_OPTIONS = ["Fes-ho més senzill", "Fes-ho més difícil", "Escurça-ho", "Allarga-ho", "Afegeix una variant"];
+const ITEM_QUICK_OPTIONS = ["Fes-ho més senzill", "Fes-ho més difícil", "Escurça-ho", "Allarga-ho", "Afegeix una variant"];
 
-// JME-44: drafts, then walks the coach through approving one activation
-// phase / block at a time (never a free-form chat) before generating the
-// one-page PDF and emailing it. See docs/ficha-entreno-schema.md for the
-// content shape and apps/api/src/training-preparation.ts for step order.
+// JME-60: drafts, then walks the coach through approving one schedule
+// item at a time (never a free-form chat) before generating the
+// one-page PDF and emailing it. See apps/api/src/training-preparation.ts
+// for the schedule-block/item content shape and step order.
 function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }: { token: string; teamId: string; eventId: string; teamName: string; onClose: () => void }) {
   const [prep, setPrep] = useState<TrainingPreparation | null>(null);
   const [loading, setLoading] = useState(true);
@@ -575,7 +621,7 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [sentTo, setSentTo] = useState<string[] | null>(null);
-  const [header, setHeader] = useState({ sessionNumber: "", coach: "", notes: "" });
+  const [header, setHeader] = useState({ sessionNumber: "", coach: "", notes: "", whatToObserve: "", closingNotes: "" });
   const [manualText, setManualText] = useState("");
 
   useEffect(() => {
@@ -605,13 +651,15 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
   const steps = content ? derivePreparationSteps(content) : [];
   const step = content && prep ? steps[prep.current_step] : null;
   const isReview = step?.kind === "review";
-  const currentText = content && step
-    ? step.kind === "activation" ? content.activation[step.phase] : step.kind === "block" ? content.blocks[step.index].description : ""
-    : "";
+  const currentItem = content && step?.kind === "item" ? content.scheduleBlocks[step.blockIndex].items[step.itemIndex] : null;
+  const currentText = currentItem?.detail ?? "";
 
   useEffect(() => {
-    if (content) setHeader({ sessionNumber: content.sessionNumber?.toString() ?? "", coach: content.coach ?? "", notes: content.notes ?? "" });
-  }, [content?.sessionNumber, content?.coach, content?.notes]);
+    if (content) setHeader({
+      sessionNumber: content.sessionNumber?.toString() ?? "", coach: content.coach ?? "", notes: content.notes ?? "",
+      whatToObserve: content.whatToObserve.join("\n"), closingNotes: content.closingNotes ?? "",
+    });
+  }, [content?.sessionNumber, content?.coach, content?.notes, content?.whatToObserve, content?.closingNotes]);
   useEffect(() => { setManualText(currentText); }, [currentText]);
 
   async function saveHeader() {
@@ -622,6 +670,8 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
         sessionNumber: header.sessionNumber ? Number(header.sessionNumber) : null,
         coach: header.coach || null,
         notes: header.notes || null,
+        whatToObserve: header.whatToObserve.split("\n").map((item) => item.trim()).filter(Boolean),
+        closingNotes: header.closingNotes || null,
       }));
     } catch { setError("No s'ha pogut desar la capçalera."); }
   }
@@ -631,16 +681,6 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
     setBusy(true); setError(""); setFeedback("");
     try { setPrep(await api.refinePreparationStep(token, teamId, eventId, prep.current_step, action)); }
     catch { setError("No s'ha pogut aplicar el canvi."); }
-    finally { setBusy(false); }
-  }
-
-  async function skip() {
-    if (!prep) return;
-    setBusy(true); setError("");
-    try {
-      const edited = await api.refinePreparationStep(token, teamId, eventId, prep.current_step, { action: "edit", value: "" });
-      setPrep(await api.refinePreparationStep(token, teamId, eventId, edited.current_step, { action: "approve" }));
-    } catch { setError("No s'ha pogut saltar la fase."); }
     finally { setBusy(false); }
   }
 
@@ -680,16 +720,17 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
         <label>Entrenador<input value={header.coach} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, coach: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
       </div>
       <label>Notes<textarea value={header.notes} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, notes: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
+      <label>Què observar (una línia per punt)<textarea value={header.whatToObserve} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, whatToObserve: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
+      <label>Notes de tancament<textarea value={header.closingNotes} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, closingNotes: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
 
-      {prep.status === "drafting" && step && !isReview && <div className="prep-step">
+      {prep.status === "drafting" && step && step.kind === "item" && currentItem && <div className="prep-step">
         <p className="prep-progress">Pas {prep.current_step + 1} de {totalVisibleSteps}</p>
         <div className="progress-track"><div className="progress-fill" style={{ width: `${((prep.current_step + 1) / totalVisibleSteps) * 100}%` }} /></div>
-        <h3>{step.kind === "activation" ? ACTIVATION_LABELS[step.phase] : `Bloc ${step.index + 1}`}</h3>
+        <h3>{content.scheduleBlocks[step.blockIndex].label} · {currentItem.title} ({currentItem.durationMinutes}')</h3>
         <textarea value={manualText} onChange={(evt) => setManualText(evt.target.value)} disabled={busy} />
-        {step.kind === "block" && <label>Exercici del banc<select value={content.blocks[step.index].exerciseId ?? ""} disabled={busy} onChange={(evt) => void apply({ action: "swap_exercise", exerciseId: evt.target.value || null })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label>}
+        <label>Exercici del banc<select value={currentItem.exerciseId ?? ""} disabled={busy} onChange={(evt) => void apply({ action: "swap_exercise", exerciseId: evt.target.value || null })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label>
         <div className="prep-options">
-          {(step.kind === "activation" ? PHASE_QUICK_OPTIONS : BLOCK_QUICK_OPTIONS).map((option) => <button key={option} type="button" className="text-action prep-chip" disabled={busy} onClick={() => void apply({ action: "feedback", instruction: option })}>{option}</button>)}
-          {step.kind === "activation" && <button type="button" className="text-action prep-chip" disabled={busy} onClick={() => void skip()}>Salta aquesta fase</button>}
+          {ITEM_QUICK_OPTIONS.map((option) => <button key={option} type="button" className="text-action prep-chip" disabled={busy} onClick={() => void apply({ action: "feedback", instruction: option })}>{option}</button>)}
         </div>
         <div className="prep-feedback"><input value={feedback} onChange={(evt) => setFeedback(evt.target.value)} placeholder="Escriu el teu propi feedback…" disabled={busy} /><button type="button" className="quiet" disabled={busy || !feedback.trim()} onClick={() => void apply({ action: "feedback", instruction: feedback })}>Envia</button></div>
         <div className="dialog-actions">
@@ -701,8 +742,11 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
 
       {prep.status === "drafting" && isReview && <div className="prep-step">
         <h3>Revisió final</h3>
-        <ul className="prep-summary">{ACTIVATION_PHASES.filter((phase) => content.activation[phase]).map((phase) => <li key={phase}><strong>{ACTIVATION_LABELS[phase]}:</strong> {content.activation[phase]}</li>)}</ul>
-        <ol className="prep-summary">{content.blocks.map((block, index) => <li key={index}>{block.description}{block.exerciseId && ` (${exercises.find((exercise) => exercise.id === block.exerciseId)?.name ?? ""})`}</li>)}</ol>
+        {content.scheduleBlocks.map((block, blockIndex) => <div key={blockIndex} className="prep-summary-block">
+          <strong>{block.label} — {SCHEDULE_KIND_LABELS[block.kind]}, {block.durationMinutes}'</strong>
+          <ol className="prep-summary">{block.items.map((item, itemIndex) => <li key={itemIndex}>{item.title} ({item.durationMinutes}'){item.exerciseId && ` — ${exercises.find((exercise) => exercise.id === item.exerciseId)?.name ?? ""}`}{item.detail && <><br />{item.detail}</>}</li>)}</ol>
+        </div>)}
+        {content.whatToObserve.length > 0 && <div className="prep-summary-block"><strong>Què observar</strong><ul className="prep-summary">{content.whatToObserve.map((point, index) => <li key={index}>{point}</li>)}</ul></div>}
         <div className="dialog-actions"><button type="button" className="quiet" disabled={busy} onClick={() => void apply({ action: "back" })}>Anterior</button><button type="button" disabled={busy} onClick={() => void finalize()}>Finalitza</button></div>
       </div>}
 
@@ -858,10 +902,29 @@ function MatchesOverview({ token, onOpenEvent, onClose }: { token: string; onOpe
   </main>;
 }
 
-type FichaBlockDraft = { description: string; diagramAssetUrl: string; exerciseId: string };
-const EMPTY_FICHA_BLOCK: FichaBlockDraft = { description: "", diagramAssetUrl: "", exerciseId: "" };
+type FichaBlockDraft = { description: string; diagramAssetUrl: string; exerciseId: string; contentTaxonomyId: string; outcome: "" | "assolit" | "cal_repetir" };
+const EMPTY_FICHA_BLOCK: FichaBlockDraft = { description: "", diagramAssetUrl: "", exerciseId: "", contentTaxonomyId: "", outcome: "" };
 
-function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamName: string; coachName: string; token: string; onCancel: () => void; onSave: (record: RecordInput) => Promise<void> }) {
+// JME-57: taxonomy nodes come back flat (parent_id only) — walk them
+// depth-first so a <select> can show them as an indented outline
+// matching the catalog's block > subblock order.
+function flattenTaxonomy(nodes: ContentTaxonomyNode[]): Array<ContentTaxonomyNode & { depth: number }> {
+  const byParent = new Map<string | null, ContentTaxonomyNode[]>();
+  for (const node of nodes) {
+    const key = node.parent_id;
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key)!.push(node);
+  }
+  const result: Array<ContentTaxonomyNode & { depth: number }> = [];
+  function walk(parentId: string | null, depth: number) {
+    for (const node of byParent.get(parentId) ?? []) { result.push({ ...node, depth }); walk(node.id, depth + 1); }
+  }
+  walk(null, 0);
+  return result;
+}
+const OUTCOME_LABELS: Record<"assolit" | "cal_repetir", string> = { assolit: "Assolit", cal_repetir: "Cal repetir" };
+
+function RecordCapture({ teamId, teamName, coachName, token, onCancel, onSave }: { teamId: string; teamName: string; coachName: string; token: string; onCancel: () => void; onSave: (record: RecordInput) => Promise<void> }) {
   const [type, setType] = useState<"training" | "match">("training");
   const [summary, setSummary] = useState("");
   const [outcome, setOutcome] = useState("");
@@ -872,9 +935,12 @@ function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamN
   const [activation, setActivation] = useState({ prevencion: "", activacionPorteros: "", activacionJugadores: "", integrado: "", participativo: "" });
   const [blocks, setBlocks] = useState<FichaBlockDraft[]>([{ ...EMPTY_FICHA_BLOCK }]);
   const [exercises, setExercises] = useState<Exercise[]>([]);
+  const [taxonomyNodes, setTaxonomyNodes] = useState<ContentTaxonomyNode[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => { if (type === "training") void api.exercises(token).then((result) => setExercises(result.exercises)).catch(() => {}); }, [type, token]);
+  useEffect(() => { if (type === "training") void api.contentTaxonomyForTeam(token, teamId).then((result) => setTaxonomyNodes(result.nodes)).catch(() => {}); }, [type, token, teamId]);
+  const taxonomyOptions = useMemo(() => flattenTaxonomy(taxonomyNodes), [taxonomyNodes]);
   function updateBlock(index: number, patch: Partial<FichaBlockDraft>) {
     setBlocks((current) => current.map((block, i) => (i === index ? { ...block, ...patch } : block)));
   }
@@ -891,6 +957,7 @@ function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamN
           activation,
           blocks: blocks.filter((block) => block.description.trim()).map((block) => ({
             description: block.description, diagramAssetUrl: block.diagramAssetUrl || undefined, exerciseId: block.exerciseId || undefined,
+            contentTaxonomyId: block.contentTaxonomyId || undefined, outcome: block.outcome || undefined,
           })),
         });
       }
@@ -911,7 +978,7 @@ function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamN
           <label>Participatiu<input value={activation.participativo} onChange={(event) => setActivation((current) => ({ ...current, participativo: event.target.value }))} /></label>
         </fieldset>
         <fieldset><legend>Blocs de la sessió (màx. 3)</legend>
-          {blocks.map((block, index) => <div key={index} className="ficha-block"><label>Descripció<textarea required={index === 0} value={block.description} onChange={(event) => updateBlock(index, { description: event.target.value })} /></label><label>Exercici del banc (opcional)<select value={block.exerciseId} onChange={(event) => updateBlock(index, { exerciseId: event.target.value })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label><label>Enllaç al diagrama (opcional)<input type="url" value={block.diagramAssetUrl} onChange={(event) => updateBlock(index, { diagramAssetUrl: event.target.value })} placeholder="https://…" /></label></div>)}
+          {blocks.map((block, index) => <div key={index} className="ficha-block"><label>Descripció<textarea required={index === 0} value={block.description} onChange={(event) => updateBlock(index, { description: event.target.value })} /></label><label>Exercici del banc (opcional)<select value={block.exerciseId} onChange={(event) => updateBlock(index, { exerciseId: event.target.value })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label><label>Contingut del catàleg (opcional)<select value={block.contentTaxonomyId} onChange={(event) => updateBlock(index, { contentTaxonomyId: event.target.value })}><option value="">— Cap —</option>{taxonomyOptions.map((node) => <option key={node.id} value={node.id}>{"— ".repeat(node.depth)}{node.code} {node.label}</option>)}</select></label>{block.contentTaxonomyId && <label>Resultat<select value={block.outcome} onChange={(event) => updateBlock(index, { outcome: event.target.value as FichaBlockDraft["outcome"] })}><option value="">Sense marcar</option>{(Object.keys(OUTCOME_LABELS) as Array<"assolit" | "cal_repetir">).map((key) => <option key={key} value={key}>{OUTCOME_LABELS[key]}</option>)}</select></label>}<label>Enllaç al diagrama (opcional)<input type="url" value={block.diagramAssetUrl} onChange={(event) => updateBlock(index, { diagramAssetUrl: event.target.value })} placeholder="https://…" /></label></div>)}
           {blocks.length < 3 && <button type="button" className="text-action" onClick={() => setBlocks((current) => [...current, { ...EMPTY_FICHA_BLOCK }])}>Afegir bloc</button>}
         </fieldset>
       </>}
