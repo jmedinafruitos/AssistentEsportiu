@@ -32,8 +32,12 @@ original de la fitxa en paper.
     {
       "orderIndex": 0,
       "description": "Circuit de conducció + xut",
-      "exerciseId": "…-uuid-…",     // opcional — referència a exercises (JME-41)
-      "diagramAssetUrl": "https://…" // opcional — vegeu nota més avall
+      "exerciseId": "…-uuid-…",         // opcional — referència a exercises (JME-41)
+      "diagramAssetUrl": "https://…",   // opcional — vegeu nota més avall
+      "contentTaxonomyId": "…-uuid-…",  // opcional (JME-58) — referència a content_taxonomy (JME-57):
+                                         // quin node del catàleg de continguts de la categoria treballa aquest bloc
+      "outcome": "assolit"              // opcional (JME-58) — "assolit" | "cal_repetir", marcat per l'entrenador;
+                                         // alimenta el seguiment de cobertura (JME-59) que llegeix la IA en preparar la propera sessió
     }
   ]
 }

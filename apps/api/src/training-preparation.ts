@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AiMessage, ConfigurableAiService } from "./ai.js";
+import { buildContentCoverage, ContentCoverage } from "./content-coverage.js";
 import { Queryable } from "./db.js";
 import { parseJsonResponse } from "./strategy-proposals.js";
 
@@ -30,6 +31,10 @@ const blockSchema = z.object({
   description: z.string().trim().min(1).max(1_000),
   diagramAssetUrl: z.string().trim().max(500).nullable().default(null),
   exerciseId: z.string().uuid().nullable().default(null),
+  // JME-58: mirrors team_records' training blocks — set once the coach
+  // picks/confirms which content-catalog node this block delivers.
+  contentTaxonomyId: z.string().uuid().nullable().default(null),
+  outcome: z.enum(["assolit", "cal_repetir"]).nullable().default(null),
 });
 
 export const trainingContentSchema = z.object({
@@ -76,6 +81,11 @@ export type TrainingContext = {
   plannedContentAreas: string[];
   dueContentTaxonomy: string | null;
   candidateExercises: Array<{ id: string; name: string; type: string; description: string | null; tags: string[] }>;
+  // JME-59: real coverage from past sessions, per content-catalog node —
+  // supersedes the static periodization progression above for picking
+  // what to prioritize (never worked, or last marked cal_repetir, or
+  // stale).
+  contentCoverage: ContentCoverage[];
 };
 
 type PeriodizationShape = {
@@ -134,6 +144,8 @@ export async function buildTrainingContext(db: Queryable, teamId: string, eventI
     ? await db.query(`SELECT id, name, type, description, tags FROM exercises WHERE tags && $1::text[] ORDER BY name LIMIT 15`, [exerciseTags])
     : await db.query(`SELECT id, name, type, description, tags FROM exercises ORDER BY name LIMIT 15`);
 
+  const contentCoverage = await buildContentCoverage(db, team.id, team.category_id);
+
   return {
     team: { id: team.id, name: team.name, season: team.season, categoryId: team.category_id, category: team.category },
     event: { id: event.id, startsAt: startsAt.toISOString(), weekday },
@@ -143,6 +155,7 @@ export async function buildTrainingContext(db: Queryable, teamId: string, eventI
     plannedContentAreas,
     dueContentTaxonomy,
     candidateExercises: exercisesResult.rows as TrainingContext["candidateExercises"],
+    contentCoverage,
   };
 }
 
@@ -153,6 +166,16 @@ export async function resolveExerciseNames(db: Queryable, exerciseIds: Array<str
   return new Map((result.rows as Array<{ id: string; name: string }>).map((row) => [row.id, row.name]));
 }
 
+// JME-59: nodes never worked, or last marked "cal_repetir", or not
+// touched in a while, sort first — a cheap proxy for spaced repetition
+// without hardcoding an interval; the AI reads the raw numbers itself.
+function prioritizedCoverage(coverage: ContentCoverage[]): ContentCoverage[] {
+  return [...coverage].sort((a, b) => {
+    const score = (entry: ContentCoverage) => (entry.timesWorked === 0 ? 0 : entry.lastOutcome === "cal_repetir" ? 1 : 2);
+    return score(a) - score(b) || (a.lastWorkedAt ?? "").localeCompare(b.lastWorkedAt ?? "");
+  });
+}
+
 function contextPrompt(context: TrainingContext): string {
   return [
     `Equip: ${context.team.name} (${context.team.category}, temporada ${context.team.season}).`,
@@ -161,6 +184,12 @@ function contextPrompt(context: TrainingContext): string {
       ? `Àrees de contingut planificades per aquest dia (periodització): ${context.plannedContentAreas.join(", ")}.`
       : "Sense graella de periodització definida per a aquesta categoria encara.",
     context.dueContentTaxonomy ? `Contingut que toca introduir/reforçar segons la progressió: ${context.dueContentTaxonomy}.` : null,
+    context.contentCoverage.length
+      ? "Catàleg de continguts de la categoria, amb cobertura real de sessions anteriors " +
+        "(timesWorked=0 vol dir mai treballat; lastOutcome=\"cal_repetir\" vol dir que la darrera vegada no es va assolir — " +
+        "prioritza aquests per sobre dels ja assolits recentment): " +
+        JSON.stringify(prioritizedCoverage(context.contentCoverage))
+      : null,
     `Estratègia activa (club/categoria/equip): ${JSON.stringify(context.strategyContexts.map((entry) => entry.content))}`,
     context.plan ? `Pla de temporada: ${JSON.stringify(context.plan)}` : null,
     `Exercicis disponibles al banc (usa'n l'id exacte si en references un): ${JSON.stringify(context.candidateExercises)}`,
@@ -180,10 +209,13 @@ export async function draftInitialContent(ai: ConfigurableAiService, context: Tr
         'Respon EXCLUSIVAMENT amb JSON vàlid amb aquesta forma exacta: {"sessionNumber": number, "coach": ' +
         'string|null, "notes": string|null, "activation": {"prevencion": string, "activacionPorteros": ' +
         'string, "activacionJugadores": string, "integrado": string, "participativo": string}, "blocks": ' +
-        '[{"orderIndex": number, "description": string, "diagramAssetUrl": null, "exerciseId": string|null}]}. ' +
+        '[{"orderIndex": number, "description": string, "diagramAssetUrl": null, "exerciseId": string|null, ' +
+        '"contentTaxonomyId": string|null}]}. ' +
         "Entre 1 i 3 blocs. Si references un exercici del banc, usa el seu id exacte a exerciseId; si no n'hi " +
-        "ha cap adequat, deixa'l null i descriu-ho a description. diagramAssetUrl sempre null (es gestiona " +
-        "fora d'aquest flux). Contingut en català.",
+        "ha cap adequat, deixa'l null i descriu-ho a description. Tria contentTaxonomyId del catàleg de " +
+        "continguts prioritzant els que la cobertura marca com a mai treballats o \"cal_repetir\"; si cap " +
+        "node del catàleg hi encaixa, deixa'l null. diagramAssetUrl sempre null (es gestiona fora d'aquest " +
+        "flux). Contingut en català.",
     },
     { role: "user", content: contextPrompt(context) },
   ];

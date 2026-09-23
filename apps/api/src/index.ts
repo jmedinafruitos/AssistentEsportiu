@@ -190,6 +190,69 @@ app.get("/v1/teams", { onRequest: [async (request) => request.jwtVerify()] }, as
   return { teams: result.rows };
 });
 
+// JME-57: coordinator-only, just enough to drive the content-taxonomy
+// admin screen's category picker.
+app.get("/v1/categories", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  if (!(await isGlobalAccess(db, identity.sub))) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(`SELECT id, name FROM categories WHERE active = true ORDER BY age_from NULLS LAST, name`);
+  return { categories: result.rows };
+});
+
+// JME-57: coordinator-only read/write of a category's content catalog —
+// a free-depth tree (block > subblock > ...), returned flat (with
+// parent_id) for the client to assemble.
+app.get("/v1/categories/:categoryId/content-taxonomy", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  if (!(await isGlobalAccess(db, identity.sub))) return reply.code(403).send({ message: "Forbidden" });
+  const { categoryId } = z.object({ categoryId: z.string().uuid() }).parse(request.params);
+  const result = await db.query(
+    `SELECT id, parent_id, code, label, example_text, order_index
+     FROM content_taxonomy WHERE category_id = $1 AND active = true
+     ORDER BY order_index, code`,
+    [categoryId],
+  );
+  return { nodes: result.rows };
+});
+
+app.post("/v1/categories/:categoryId/content-taxonomy", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  if (!(await isGlobalAccess(db, identity.sub))) return reply.code(403).send({ message: "Forbidden" });
+  const { categoryId } = z.object({ categoryId: z.string().uuid() }).parse(request.params);
+  const body = z.object({
+    parentId: z.string().uuid().optional(),
+    code: z.string().trim().min(1).max(20),
+    label: z.string().trim().min(1).max(200),
+    exampleText: z.string().trim().max(500).optional(),
+    orderIndex: z.number().int().default(0),
+  }).parse(request.body);
+  const result = await db.query(
+    `INSERT INTO content_taxonomy (category_id, parent_id, code, label, example_text, order_index)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id, parent_id, code, label, example_text, order_index`,
+    [categoryId, body.parentId ?? null, body.code, body.label, body.exampleText ?? null, body.orderIndex],
+  );
+  return reply.code(201).send(result.rows[0]);
+});
+
+// JME-57/58: team-scoped read (resolves the team's category server-side)
+// for the pickers inside RecordCapture / training preparation — those
+// only ever have a teamId in scope, not a category_id.
+app.get("/v1/teams/:teamId/content-taxonomy", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
+  const identity = request.user as { sub: string };
+  const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
+  if (!(await hasTeamAccess(db, identity.sub, teamId))) return reply.code(403).send({ message: "Forbidden" });
+  const result = await db.query(
+    `SELECT ct.id, ct.parent_id, ct.code, ct.label, ct.example_text, ct.order_index
+     FROM content_taxonomy ct
+     JOIN teams t ON t.category_id = ct.category_id
+     WHERE t.id = $1 AND ct.active = true
+     ORDER BY ct.order_index, ct.code`,
+    [teamId],
+  );
+  return { nodes: result.rows };
+});
+
 app.get("/v1/teams/:teamId", { onRequest: [async (request) => request.jwtVerify()] }, async (request, reply) => {
   const identity = request.user as { sub: string };
   const { teamId } = z.object({ teamId: z.string().uuid() }).parse(request.params);
@@ -496,6 +559,11 @@ const trainingBlockSchema = z.object({
   description: z.string().trim().min(1).max(1_000),
   diagramAssetUrl: z.string().trim().url().optional(),
   exerciseId: z.string().uuid().optional(),
+  // JME-58: which content-catalog node this block delivers, and whether
+  // the coach judged it assolit ("mastered") or cal_repetir ("needs
+  // repeating") — feeds JME-59's coverage tracking for the AI.
+  contentTaxonomyId: z.string().uuid().optional(),
+  outcome: z.enum(["assolit", "cal_repetir"]).optional(),
 });
 const recordBodySchema = z.discriminatedUnion("type", [
   z.object({
@@ -538,6 +606,8 @@ app.post("/v1/teams/:teamId/records", { onRequest: [async (request) => request.j
           description: block.description,
           diagramAssetUrl: block.diagramAssetUrl ?? null,
           exerciseId: block.exerciseId ?? null,
+          contentTaxonomyId: block.contentTaxonomyId ?? null,
+          outcome: block.outcome ?? null,
         })),
       };
   const result = await db.query(
@@ -1288,14 +1358,17 @@ app.get("/v1/exercises", { onRequest: [async (request) => request.jwtVerify()] }
   const query = z.object({
     tag: z.string().trim().min(1).optional(),
     type: z.enum(["juego", "circuito", "ejercicio", "tactica"]).optional(),
+    contentTaxonomyId: z.string().uuid().optional(),
   }).parse(request.query);
   const result = await db.query(
-    `SELECT id, name, type, description, variants, tags, source_document_id, page_ref, created_at
-     FROM exercises
-     WHERE ($1::text IS NULL OR tags @> ARRAY[$1::text])
-       AND ($2::text IS NULL OR type = $2)
-     ORDER BY name`,
-    [query.tag ?? null, query.type ?? null],
+    `SELECT e.id, e.name, e.type, e.description, e.variants, e.tags, e.source_document_id, e.page_ref, e.created_at,
+       COALESCE((SELECT json_agg(ect.content_taxonomy_id) FROM exercise_content_tags ect WHERE ect.exercise_id = e.id), '[]') AS content_taxonomy_ids
+     FROM exercises e
+     WHERE ($1::text IS NULL OR e.tags @> ARRAY[$1::text])
+       AND ($2::text IS NULL OR e.type = $2)
+       AND ($3::uuid IS NULL OR EXISTS (SELECT 1 FROM exercise_content_tags ect WHERE ect.exercise_id = e.id AND ect.content_taxonomy_id = $3))
+     ORDER BY e.name`,
+    [query.tag ?? null, query.type ?? null, query.contentTaxonomyId ?? null],
   );
   return { exercises: result.rows };
 });
@@ -1333,6 +1406,9 @@ app.patch("/v1/exercises/:exerciseId", { onRequest: [async (request) => request.
     description: z.string().trim().max(4_000).nullable().optional(),
     variants: z.array(z.string().trim().min(1).max(300)).max(20).optional(),
     tags: z.array(z.string().trim().min(1).max(60)).max(20).optional(),
+    // JME-58: replaces the full set when present — mirrors how `tags`
+    // above already works (COALESCE = "leave unless provided").
+    contentTaxonomyIds: z.array(z.string().uuid()).max(20).optional(),
   }).parse(request.body);
   const result = await db.query(
     `UPDATE exercises
@@ -1346,6 +1422,15 @@ app.patch("/v1/exercises/:exerciseId", { onRequest: [async (request) => request.
     [exerciseId, body.name ?? null, body.type ?? null, "description" in body, body.description ?? null, body.variants ?? null, body.tags ?? null],
   );
   if (!result.rowCount) return reply.code(404).send({ message: "Exercise not found" });
+  if (body.contentTaxonomyIds) {
+    await db.query("DELETE FROM exercise_content_tags WHERE exercise_id = $1", [exerciseId]);
+    if (body.contentTaxonomyIds.length) {
+      await db.query(
+        `INSERT INTO exercise_content_tags (exercise_id, content_taxonomy_id) SELECT $1, unnest($2::uuid[])`,
+        [exerciseId, body.contentTaxonomyIds],
+      );
+    }
+  }
   return result.rows[0];
 });
 

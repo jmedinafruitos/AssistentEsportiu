@@ -22,8 +22,15 @@ export type ChatMessage = { id: string; role: "user" | "assistant"; content: str
 export type TrainingActivation = {
   prevencion?: string; activacionPorteros?: string; activacionJugadores?: string; integrado?: string; participativo?: string;
 };
-export type TrainingBlockInput = { description: string; diagramAssetUrl?: string; exerciseId?: string };
-export type TrainingBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null };
+// JME-58: contentTaxonomyId links a block to the content catalog;
+// outcome is the coach's own call after the session, "assolit" or
+// "cal_repetir" — feeds JME-59's coverage tracking.
+export type TrainingBlockInput = { description: string; diagramAssetUrl?: string; exerciseId?: string; contentTaxonomyId?: string; outcome?: "assolit" | "cal_repetir" };
+export type TrainingBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null; contentTaxonomyId: string | null; outcome: "assolit" | "cal_repetir" | null };
+// JME-57: a category's content catalog, flat (client assembles the tree
+// via parent_id) — free-depth, not a fixed block/subblock shape.
+export type ContentTaxonomyNode = { id: string; parent_id: string | null; code: string; label: string; example_text: string | null; order_index: number };
+export type Category = { id: string; name: string };
 export type RecordInput =
   | { type: "match"; happenedAt: string; summary: string; outcome?: string; nextObjectives: string[] }
   | { type: "training"; happenedAt: string; sessionNumber?: number; coach?: string; notes?: string; activation?: TrainingActivation; blocks: TrainingBlockInput[] };
@@ -51,7 +58,7 @@ export function derivePreparationSteps(content: PreparationContent): Preparation
     { kind: "review" },
   ];
 }
-export type PreparationBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null };
+export type PreparationBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null; contentTaxonomyId: string | null; outcome: "assolit" | "cal_repetir" | null };
 export type PreparationContent = {
   sessionNumber: number | null; coach: string | null; notes: string | null;
   activation: Record<ActivationPhase, string>;
@@ -68,6 +75,7 @@ export type RefineAction =
 export type Exercise = {
   id: string; name: string; type: "juego" | "circuito" | "ejercicio" | "tactica"; description: string | null;
   variants: string[]; tags: string[]; source_document_id: string | null; page_ref: string | null; created_at: string;
+  content_taxonomy_ids?: string[];
 };
 export type CoordinatorOverview = {
   teams: Array<Team & { staff_count: number; record_count: number; last_activity_at: string | null }>;
@@ -187,6 +195,13 @@ export const api = {
   resetPassword: (token: string, userId: string) =>
     request<{ ok: true }>(`/v1/users/${userId}/reset-password`, { method: "POST" }, token),
   teams: (token: string) => request<{ teams: Team[] }>("/v1/teams", {}, token),
+  categories: (token: string) => request<{ categories: Category[] }>("/v1/categories", {}, token),
+  contentTaxonomyForCategory: (token: string, categoryId: string) =>
+    request<{ nodes: ContentTaxonomyNode[] }>(`/v1/categories/${categoryId}/content-taxonomy`, {}, token),
+  createContentTaxonomyNode: (token: string, categoryId: string, node: { parentId?: string; code: string; label: string; exampleText?: string; orderIndex?: number }) =>
+    request<ContentTaxonomyNode>(`/v1/categories/${categoryId}/content-taxonomy`, { method: "POST", body: JSON.stringify(node) }, token),
+  contentTaxonomyForTeam: (token: string, teamId: string) =>
+    request<{ nodes: ContentTaxonomyNode[] }>(`/v1/teams/${teamId}/content-taxonomy`, {}, token),
   chat: (token: string, teamId: string, message: string, history: ChatMessage[]) =>
     request<{ id: string; content: string; createdAt: string }>("/v1/chat", {
       method: "POST",

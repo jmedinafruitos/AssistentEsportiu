@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, ConflictDetail, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, ManagedUser, Player, RecordInput, RefineAction, RosterEntry, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, Category, ConflictDetail, ContentTaxonomyNode, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, ManagedUser, Player, RecordInput, RefineAction, RosterEntry, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
 import { loginWithPasskey, passkeysAvailable, registerPasskey } from "./webauthn";
 import "./styles.css";
 
@@ -40,6 +40,7 @@ function App() {
   const [mineOnly, setMineOnly] = useState(false);
   const [viewingMatches, setViewingMatches] = useState(false);
   const [managingUsers, setManagingUsers] = useState(false);
+  const [managingContentTaxonomy, setManagingContentTaxonomy] = useState(false);
   // JME-56: shown once right after a forced password change, never on a
   // later login — not persisted, purely a same-session sequencing flag.
   const [passkeyOfferPending, setPasskeyOfferPending] = useState(false);
@@ -165,6 +166,7 @@ function App() {
       onActivatePasskey={() => void activatePasskey()}
       onViewMatches={() => { setViewingMatches(true); setMenuOpen(false); }}
       onManageUsers={() => { setManagingUsers(true); setMenuOpen(false); }}
+      onManageContentTaxonomy={() => { setManagingContentTaxonomy(true); setMenuOpen(false); }}
       onShowOverview={() => {
         setMenuOpen(false);
         if (overview) setOverview(null);
@@ -172,12 +174,13 @@ function App() {
       }}
       onLogout={() => { setMenuOpen(false); logout(); }}
     />}
-    {recording && <RecordCapture teamName={actionTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, actionTeamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
+    {recording && <RecordCapture teamId={actionTeamId} teamName={actionTeam?.name ?? "l'equip"} coachName={user.name} token={token} onCancel={() => setRecording(false)} onSave={async (record) => { await api.createRecord(token, actionTeamId, record); setRecording(false); setNotice("Activitat desada a l'historial de l'equip."); }} />}
     {planning && <PlanningEditor token={token} teamId={actionTeamId} teamName={actionTeam?.name ?? "l'equip"} onClose={() => setPlanning(false)} />}
     {managingPlayers && <PlayersEditor token={token} teams={teams} teamId={actionTeamId} onClose={() => setManagingPlayers(false)} />}
     {creatingEvent && <EventEditor token={token} teamId={actionTeamId} onClose={() => setCreatingEvent(false)} onSaved={() => { setCreatingEvent(false); void refreshEvents(); }} />}
     {managingTemplates && <ActionTemplatesEditor token={token} teams={teams} onClose={() => setManagingTemplates(false)} />}
     {managingUsers && <ManageUsers token={token} onClose={() => setManagingUsers(false)} />}
+    {managingContentTaxonomy && <ManageContentTaxonomy token={token} onClose={() => setManagingContentTaxonomy(false)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
   </main>;
@@ -188,11 +191,11 @@ function App() {
 // event, the two things that used to be chat-suggestion buttons (record
 // activity, planning), and the coordinator-only actions. Team switching
 // moved to the header pill, so it no longer lives here.
-function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onManageUsers, onLogout }: {
+function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onManageUsers, onManageContentTaxonomy, onLogout }: {
   user: CurrentUser; syncingFecapa: boolean; canUsePasskeys: boolean; activatingPasskey: boolean;
   onClose: () => void; onAddEvent: () => void;
   onRecordActivity: () => void; onPlanning: () => void; onManagePlayers: () => void; onManageTemplates: () => void;
-  onSyncFecapa: () => void; onActivatePasskey: () => void; onViewMatches: () => void; onShowOverview: () => void; onManageUsers: () => void; onLogout: () => void;
+  onSyncFecapa: () => void; onActivatePasskey: () => void; onViewMatches: () => void; onShowOverview: () => void; onManageUsers: () => void; onManageContentTaxonomy: () => void; onLogout: () => void;
 }) {
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <aside className="drawer" role="dialog" aria-modal="true" aria-label="Menú" onClick={(event) => event.stopPropagation()}>
@@ -209,6 +212,7 @@ function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey,
         <button type="button" className="menu-item" onClick={onViewMatches}>Partits</button>
         <button type="button" className="menu-item" onClick={onShowOverview}>Visió global</button>
         <button type="button" className="menu-item" onClick={onManageUsers}>Usuaris</button>
+        <button type="button" className="menu-item" onClick={onManageContentTaxonomy}>Continguts</button>
       </>}
       <hr />
       <button type="button" className="menu-item danger" onClick={onLogout}>Sortir</button>
@@ -284,6 +288,49 @@ function ManageUsers({ token, onClose }: { token: string; onClose: () => void })
       <button type="button" className="text-action" disabled={resettingId === user.id} onClick={() => void resetPassword(user)}>{resettingId === user.id ? "Restablint…" : "Restableix contrasenya temporal"}</button>
     </li>)}</ul>
     <div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Tancar</button></div>
+  </section></div>;
+}
+
+// JME-57: coordinator-only. One category's content catalog at a time —
+// a free-depth tree (block > subblock > ...), shown flat with indent by
+// depth. New nodes only (no edit/delete yet — this is the starting
+// catalog for Prebenjamí/Benjamí, deliberately small, expanded here).
+function ManageContentTaxonomy({ token, onClose }: { token: string; onClose: () => void }) {
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [categoryId, setCategoryId] = useState("");
+  const [nodes, setNodes] = useState<ContentTaxonomyNode[]>([]);
+  const [parentId, setParentId] = useState("");
+  const [code, setCode] = useState("");
+  const [label, setLabel] = useState("");
+  const [exampleText, setExampleText] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { void api.categories(token).then((result) => { setCategories(result.categories); setCategoryId((current) => current || result.categories[0]?.id || ""); }).catch(() => setError("No s'han pogut carregar les categories.")); }, [token]);
+  useEffect(() => { if (categoryId) void api.contentTaxonomyForCategory(token, categoryId).then((result) => setNodes(result.nodes)).catch(() => setError("No s'ha pogut carregar el catàleg.")); }, [token, categoryId]);
+  const flat = useMemo(() => flattenTaxonomy(nodes), [nodes]);
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setSaving(true); setError("");
+    try {
+      const created = await api.createContentTaxonomyNode(token, categoryId, { parentId: parentId || undefined, code, label, exampleText: exampleText || undefined });
+      setNodes((current) => [...current, created]);
+      setCode(""); setLabel(""); setExampleText("");
+    } catch { setError("No s'ha pogut desar el node."); }
+    finally { setSaving(false); }
+  }
+  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true">
+    <h2>Continguts</h2>
+    <label>Categoria<select value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>{categories.map((category) => <option key={category.id} value={category.id}>{category.name}</option>)}</select></label>
+    {error && <p className="error">{error}</p>}
+    <ul className="template-list">{flat.map((node) => <li key={node.id}>
+      <strong>{"— ".repeat(node.depth)}{node.code}</strong><span>{node.label}</span>{node.example_text && <em>{node.example_text}</em>}
+    </li>)}</ul>
+    <form onSubmit={submit}>
+      <label>Node pare (opcional, per crear un subbloc)<select value={parentId} onChange={(event) => setParentId(event.target.value)}><option value="">— Arrel (bloc nou) —</option>{flat.map((node) => <option key={node.id} value={node.id}>{"— ".repeat(node.depth)}{node.code} {node.label}</option>)}</select></label>
+      <label>Codi (ex: 1.3)<input required value={code} onChange={(event) => setCode(event.target.value)} /></label>
+      <label>Nom<input required value={label} onChange={(event) => setLabel(event.target.value)} /></label>
+      <label>Exemple (opcional)<input value={exampleText} onChange={(event) => setExampleText(event.target.value)} /></label>
+      <div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Tancar</button><button disabled={saving || !categoryId}>{saving ? "Desant…" : "Afegir"}</button></div>
+    </form>
   </section></div>;
 }
 
@@ -858,10 +905,29 @@ function MatchesOverview({ token, onOpenEvent, onClose }: { token: string; onOpe
   </main>;
 }
 
-type FichaBlockDraft = { description: string; diagramAssetUrl: string; exerciseId: string };
-const EMPTY_FICHA_BLOCK: FichaBlockDraft = { description: "", diagramAssetUrl: "", exerciseId: "" };
+type FichaBlockDraft = { description: string; diagramAssetUrl: string; exerciseId: string; contentTaxonomyId: string; outcome: "" | "assolit" | "cal_repetir" };
+const EMPTY_FICHA_BLOCK: FichaBlockDraft = { description: "", diagramAssetUrl: "", exerciseId: "", contentTaxonomyId: "", outcome: "" };
 
-function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamName: string; coachName: string; token: string; onCancel: () => void; onSave: (record: RecordInput) => Promise<void> }) {
+// JME-57: taxonomy nodes come back flat (parent_id only) — walk them
+// depth-first so a <select> can show them as an indented outline
+// matching the catalog's block > subblock order.
+function flattenTaxonomy(nodes: ContentTaxonomyNode[]): Array<ContentTaxonomyNode & { depth: number }> {
+  const byParent = new Map<string | null, ContentTaxonomyNode[]>();
+  for (const node of nodes) {
+    const key = node.parent_id;
+    if (!byParent.has(key)) byParent.set(key, []);
+    byParent.get(key)!.push(node);
+  }
+  const result: Array<ContentTaxonomyNode & { depth: number }> = [];
+  function walk(parentId: string | null, depth: number) {
+    for (const node of byParent.get(parentId) ?? []) { result.push({ ...node, depth }); walk(node.id, depth + 1); }
+  }
+  walk(null, 0);
+  return result;
+}
+const OUTCOME_LABELS: Record<"assolit" | "cal_repetir", string> = { assolit: "Assolit", cal_repetir: "Cal repetir" };
+
+function RecordCapture({ teamId, teamName, coachName, token, onCancel, onSave }: { teamId: string; teamName: string; coachName: string; token: string; onCancel: () => void; onSave: (record: RecordInput) => Promise<void> }) {
   const [type, setType] = useState<"training" | "match">("training");
   const [summary, setSummary] = useState("");
   const [outcome, setOutcome] = useState("");
@@ -872,9 +938,12 @@ function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamN
   const [activation, setActivation] = useState({ prevencion: "", activacionPorteros: "", activacionJugadores: "", integrado: "", participativo: "" });
   const [blocks, setBlocks] = useState<FichaBlockDraft[]>([{ ...EMPTY_FICHA_BLOCK }]);
   const [exercises, setExercises] = useState<Exercise[]>([]);
+  const [taxonomyNodes, setTaxonomyNodes] = useState<ContentTaxonomyNode[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => { if (type === "training") void api.exercises(token).then((result) => setExercises(result.exercises)).catch(() => {}); }, [type, token]);
+  useEffect(() => { if (type === "training") void api.contentTaxonomyForTeam(token, teamId).then((result) => setTaxonomyNodes(result.nodes)).catch(() => {}); }, [type, token, teamId]);
+  const taxonomyOptions = useMemo(() => flattenTaxonomy(taxonomyNodes), [taxonomyNodes]);
   function updateBlock(index: number, patch: Partial<FichaBlockDraft>) {
     setBlocks((current) => current.map((block, i) => (i === index ? { ...block, ...patch } : block)));
   }
@@ -891,6 +960,7 @@ function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamN
           activation,
           blocks: blocks.filter((block) => block.description.trim()).map((block) => ({
             description: block.description, diagramAssetUrl: block.diagramAssetUrl || undefined, exerciseId: block.exerciseId || undefined,
+            contentTaxonomyId: block.contentTaxonomyId || undefined, outcome: block.outcome || undefined,
           })),
         });
       }
@@ -911,7 +981,7 @@ function RecordCapture({ teamName, coachName, token, onCancel, onSave }: { teamN
           <label>Participatiu<input value={activation.participativo} onChange={(event) => setActivation((current) => ({ ...current, participativo: event.target.value }))} /></label>
         </fieldset>
         <fieldset><legend>Blocs de la sessió (màx. 3)</legend>
-          {blocks.map((block, index) => <div key={index} className="ficha-block"><label>Descripció<textarea required={index === 0} value={block.description} onChange={(event) => updateBlock(index, { description: event.target.value })} /></label><label>Exercici del banc (opcional)<select value={block.exerciseId} onChange={(event) => updateBlock(index, { exerciseId: event.target.value })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label><label>Enllaç al diagrama (opcional)<input type="url" value={block.diagramAssetUrl} onChange={(event) => updateBlock(index, { diagramAssetUrl: event.target.value })} placeholder="https://…" /></label></div>)}
+          {blocks.map((block, index) => <div key={index} className="ficha-block"><label>Descripció<textarea required={index === 0} value={block.description} onChange={(event) => updateBlock(index, { description: event.target.value })} /></label><label>Exercici del banc (opcional)<select value={block.exerciseId} onChange={(event) => updateBlock(index, { exerciseId: event.target.value })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label><label>Contingut del catàleg (opcional)<select value={block.contentTaxonomyId} onChange={(event) => updateBlock(index, { contentTaxonomyId: event.target.value })}><option value="">— Cap —</option>{taxonomyOptions.map((node) => <option key={node.id} value={node.id}>{"— ".repeat(node.depth)}{node.code} {node.label}</option>)}</select></label>{block.contentTaxonomyId && <label>Resultat<select value={block.outcome} onChange={(event) => updateBlock(index, { outcome: event.target.value as FichaBlockDraft["outcome"] })}><option value="">Sense marcar</option>{(Object.keys(OUTCOME_LABELS) as Array<"assolit" | "cal_repetir">).map((key) => <option key={key} value={key}>{OUTCOME_LABELS[key]}</option>)}</select></label>}<label>Enllaç al diagrama (opcional)<input type="url" value={block.diagramAssetUrl} onChange={(event) => updateBlock(index, { diagramAssetUrl: event.target.value })} placeholder="https://…" /></label></div>)}
           {blocks.length < 3 && <button type="button" className="text-action" onClick={() => setBlocks((current) => [...current, { ...EMPTY_FICHA_BLOCK }])}>Afegir bloc</button>}
         </fieldset>
       </>}
