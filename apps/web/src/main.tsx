@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, ConflictDetail, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, Player, RecordInput, RefineAction, RosterEntry, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, ConflictDetail, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, ManagedUser, Player, RecordInput, RefineAction, RosterEntry, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
 import { loginWithPasskey, passkeysAvailable, registerPasskey } from "./webauthn";
 import "./styles.css";
 
@@ -39,6 +39,10 @@ function App() {
   // persisted, defaults to "Tots" (unfiltered) each visit.
   const [mineOnly, setMineOnly] = useState(false);
   const [viewingMatches, setViewingMatches] = useState(false);
+  const [managingUsers, setManagingUsers] = useState(false);
+  // JME-56: shown once right after a forced password change, never on a
+  // later login — not persisted, purely a same-session sequencing flag.
+  const [passkeyOfferPending, setPasskeyOfferPending] = useState(false);
 
   useEffect(() => { void passkeysAvailable().then(setCanUsePasskeys); }, []);
 
@@ -113,8 +117,17 @@ function App() {
     finally { setActivatingPasskey(false); }
   }
 
+  // JME-56: after the forced password change, offer biometrics once (only
+  // if the device supports it) before continuing into the app.
+  async function handlePasswordChanged() {
+    setUser(await api.me(token));
+    if (canUsePasskeys) setPasskeyOfferPending(true);
+  }
+
   if (!token || (!user && !loading)) return <Login onLogin={login} onPasskeyLogin={canUsePasskeys ? loginWithBiometrics : undefined} loading={loading} error={error} />;
   if (!user) return <main className="centered" aria-live="polite">Carregant el teu context…</main>;
+  if (user.must_change_password) return <ForcedPasswordChange token={token} onChanged={() => void handlePasswordChanged()} />;
+  if (passkeyOfferPending) return <PasskeyOffer activating={activatingPasskey} onActivate={async () => { await activatePasskey(); setPasskeyOfferPending(false); }} onSkip={() => setPasskeyOfferPending(false)} />;
   // JME-47: an open event workspace takes over the whole screen instead of
   // overlaying the home screen — "Enrere" inside each component returns
   // here by clearing this state.
@@ -151,6 +164,7 @@ function App() {
       onSyncFecapa={() => { setMenuOpen(false); void syncFecapa(); }}
       onActivatePasskey={() => void activatePasskey()}
       onViewMatches={() => { setViewingMatches(true); setMenuOpen(false); }}
+      onManageUsers={() => { setManagingUsers(true); setMenuOpen(false); }}
       onShowOverview={() => {
         setMenuOpen(false);
         if (overview) setOverview(null);
@@ -163,6 +177,7 @@ function App() {
     {managingPlayers && <PlayersEditor token={token} teams={teams} teamId={actionTeamId} onClose={() => setManagingPlayers(false)} />}
     {creatingEvent && <EventEditor token={token} teamId={actionTeamId} onClose={() => setCreatingEvent(false)} onSaved={() => { setCreatingEvent(false); void refreshEvents(); }} />}
     {managingTemplates && <ActionTemplatesEditor token={token} teams={teams} onClose={() => setManagingTemplates(false)} />}
+    {managingUsers && <ManageUsers token={token} onClose={() => setManagingUsers(false)} />}
     {notice && <p className="notice" role="status">{notice}</p>}
     {error && <p className="error" role="alert">{error}</p>}
   </main>;
@@ -173,11 +188,11 @@ function App() {
 // event, the two things that used to be chat-suggestion buttons (record
 // activity, planning), and the coordinator-only actions. Team switching
 // moved to the header pill, so it no longer lives here.
-function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onLogout }: {
+function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey, onClose, onAddEvent, onRecordActivity, onPlanning, onManagePlayers, onManageTemplates, onSyncFecapa, onActivatePasskey, onViewMatches, onShowOverview, onManageUsers, onLogout }: {
   user: CurrentUser; syncingFecapa: boolean; canUsePasskeys: boolean; activatingPasskey: boolean;
   onClose: () => void; onAddEvent: () => void;
   onRecordActivity: () => void; onPlanning: () => void; onManagePlayers: () => void; onManageTemplates: () => void;
-  onSyncFecapa: () => void; onActivatePasskey: () => void; onViewMatches: () => void; onShowOverview: () => void; onLogout: () => void;
+  onSyncFecapa: () => void; onActivatePasskey: () => void; onViewMatches: () => void; onShowOverview: () => void; onManageUsers: () => void; onLogout: () => void;
 }) {
   return <div className="modal-backdrop" role="presentation" onClick={onClose}>
     <aside className="drawer" role="dialog" aria-modal="true" aria-label="Menú" onClick={(event) => event.stopPropagation()}>
@@ -193,11 +208,83 @@ function HamburgerMenu({ user, syncingFecapa, canUsePasskeys, activatingPasskey,
         <button type="button" className="menu-item" disabled={syncingFecapa} onClick={onSyncFecapa}>{syncingFecapa ? "Sincronitzant…" : "Sincronitzar FECAPA"}</button>
         <button type="button" className="menu-item" onClick={onViewMatches}>Partits</button>
         <button type="button" className="menu-item" onClick={onShowOverview}>Visió global</button>
+        <button type="button" className="menu-item" onClick={onManageUsers}>Usuaris</button>
       </>}
       <hr />
       <button type="button" className="menu-item danger" onClick={onLogout}>Sortir</button>
     </aside>
   </div>;
+}
+
+// JME-56: gates the whole app until the user is off the temporary
+// password — no way to dismiss or skip. Reuses the login screen's layout
+// so it doesn't feel like a different app mid-onboarding.
+function ForcedPasswordChange({ token, onChanged }: { token: string; onChanged: () => void }) {
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (newPassword !== confirmPassword) { setError("Les contrasenyes no coincideixen."); return; }
+    setSaving(true); setError("");
+    try { await api.changePassword(token, newPassword); onChanged(); }
+    catch { setError("No s'ha pogut canviar la contrasenya. Prova amb una altra."); setSaving(false); }
+  }
+  return <main className="login"><section className="login-card">
+    <img className="club-logo" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" />
+    <p className="club">HOQUEI CLUB SENTMENAT</p>
+    <h1>Canvia la contrasenya</h1>
+    <p className="intro">Estàs entrant amb una contrasenya temporal. Tria'n una de nova abans de continuar.</p>
+    <form onSubmit={submit}>
+      <label>Contrasenya nova<input type="password" autoComplete="new-password" minLength={8} required value={newPassword} onChange={(event) => setNewPassword(event.target.value)} /></label>
+      <label>Repeteix-la<input type="password" autoComplete="new-password" minLength={8} required value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} /></label>
+      {error && <p className="error" role="alert">{error}</p>}
+      <button disabled={saving}>{saving ? "Desant…" : "Canvia la contrasenya"}</button>
+    </form>
+  </section></main>;
+}
+
+// JME-56: shown once, right after the forced password change, only when
+// this device supports a platform authenticator. Reuses the same
+// registerPasskey flow as the hamburger menu's "Activa Face ID" button.
+function PasskeyOffer({ activating, onActivate, onSkip }: { activating: boolean; onActivate: () => Promise<void>; onSkip: () => void }) {
+  return <main className="login"><section className="login-card">
+    <img className="club-logo" src="/hc-sentmenat-logo.png" alt="Escut de l'HC Sentmenat" />
+    <h1>Activa l'accés ràpid</h1>
+    <p className="intro">Vols entrar amb Face ID o empremta digital en aquest dispositiu, en lloc de la contrasenya?</p>
+    <button disabled={activating} onClick={() => void onActivate()}>{activating ? "Activant…" : "Activar"}</button>
+    <button type="button" className="quiet" disabled={activating} onClick={onSkip}>Ara no</button>
+  </section></main>;
+}
+
+// JME-56: coordinator-only. Lists existing users and resets a picked one
+// onto the club-wide temporary password — never creates a user, and never
+// shows the password itself (it's the same fixed value everyone already
+// knows, not generated per user).
+function ManageUsers({ token, onClose }: { token: string; onClose: () => void }) {
+  const [users, setUsers] = useState<ManagedUser[]>([]);
+  const [resettingId, setResettingId] = useState("");
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => { void api.users(token).then((result) => setUsers(result.users)).catch(() => setError("No s'han pogut carregar els usuaris.")); }, [token]);
+  async function resetPassword(user: ManagedUser) {
+    setResettingId(user.id); setError(""); setNotice("");
+    try { await api.resetPassword(token, user.id); setUsers((current) => current.map((item) => item.id === user.id ? { ...item, must_change_password: true } : item)); setNotice(`Contrasenya temporal assignada a ${user.name}.`); }
+    catch { setError(`No s'ha pogut restablir la contrasenya de ${user.name}.`); }
+    finally { setResettingId(""); }
+  }
+  return <div className="modal-backdrop"><section className="record-card" role="dialog" aria-modal="true">
+    <h2>Usuaris</h2>
+    {notice && <p className="notice" role="status">{notice}</p>}
+    {error && <p className="error">{error}</p>}
+    <ul className="template-list">{users.map((user) => <li key={user.id}>
+      <strong>{user.name}</strong><span>{user.email}</span>
+      {user.must_change_password && <em>Pendent de canvi</em>}
+      <button type="button" className="text-action" disabled={resettingId === user.id} onClick={() => void resetPassword(user)}>{resettingId === user.id ? "Restablint…" : "Restableix contrasenya temporal"}</button>
+    </li>)}</ul>
+    <div className="dialog-actions"><button type="button" className="quiet" onClick={onClose}>Tancar</button></div>
+  </section></div>;
 }
 
 function eventTypeLabel(type: "training" | "match" | "meeting") { return type === "training" ? "Entrenament" : type === "match" ? "Partit" : "Reunió"; }
