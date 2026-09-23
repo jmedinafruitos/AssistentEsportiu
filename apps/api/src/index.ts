@@ -23,6 +23,7 @@ import { suggestExercisesFromSummary } from "./exercise-suggestions.js";
 import { syncEventToCalendar } from "./google-calendar.js";
 import { emailConfigured, sendEmail } from "./resend.js";
 import {
+  allExerciseIds,
   applyManualEdit,
   buildEmailHtml,
   buildEmailSubject,
@@ -1518,6 +1519,10 @@ app.patch(
       sessionNumber: z.number().int().positive().nullable().optional(),
       coach: z.string().trim().max(200).nullable().optional(),
       notes: z.string().trim().max(2_000).nullable().optional(),
+      // JME-60: session-wide fields, edited directly rather than through
+      // the per-item AI refine flow.
+      whatToObserve: z.array(z.string().trim().min(1).max(300)).max(10).optional(),
+      closingNotes: z.string().trim().max(1_000).nullable().optional(),
     }).parse(request.body);
     const allowed = await hasEventAccess(db, identity.sub, teamId, eventId);
     if (!allowed) return reply.code(403).send({ message: "Forbidden" });
@@ -1536,6 +1541,8 @@ app.patch(
       sessionNumber: "sessionNumber" in body ? body.sessionNumber ?? null : content.sessionNumber,
       coach: "coach" in body ? body.coach ?? null : content.coach,
       notes: "notes" in body ? body.notes ?? null : content.notes,
+      whatToObserve: body.whatToObserve ?? content.whatToObserve,
+      closingNotes: "closingNotes" in body ? body.closingNotes ?? null : content.closingNotes,
     };
     const updated = await db.query(
       `UPDATE training_preparations SET draft_content = $2, updated_at = now() WHERE id = $1
@@ -1672,9 +1679,8 @@ app.get(
     if (row.status === "drafting") return reply.code(409).send({ message: "Finalize the preparation first" });
 
     const content = trainingContentSchema.parse(row.draft_content);
-    const exerciseNames = await resolveExerciseNames(db, content.blocks.map((block) => block.exerciseId));
-    const eventDate = new Date(row.starts_at).toISOString().slice(0, 10);
-    const pdf = await generateTrainingPdf(row.team_name, eventDate, content, exerciseNames);
+    const exerciseNames = await resolveExerciseNames(db, allExerciseIds(content));
+    const pdf = await generateTrainingPdf(row.team_name, new Date(row.starts_at).toISOString(), content, exerciseNames);
     reply.header("content-type", "application/pdf");
     reply.header("content-disposition", `inline; filename="entrenament.pdf"`);
     return reply.send(pdf);
@@ -1707,8 +1713,8 @@ app.post(
 
     const content = trainingContentSchema.parse(row.draft_content);
     const eventDate = new Date(row.starts_at).toISOString().slice(0, 10);
-    const exerciseNames = await resolveExerciseNames(db, content.blocks.map((block) => block.exerciseId));
-    const pdf = await generateTrainingPdf(row.team_name, eventDate, content, exerciseNames);
+    const exerciseNames = await resolveExerciseNames(db, allExerciseIds(content));
+    const pdf = await generateTrainingPdf(row.team_name, new Date(row.starts_at).toISOString(), content, exerciseNames);
     const recipients = await resolveRecipients(db, teamId, row.created_by);
 
     try {

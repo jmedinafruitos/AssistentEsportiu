@@ -4,58 +4,69 @@ import { buildContentCoverage, ContentCoverage } from "./content-coverage.js";
 import { Queryable } from "./db.js";
 import { parseJsonResponse } from "./strategy-proposals.js";
 
-// ---- content shape — mirrors docs/ficha-entreno-schema.md (JME-42),
-// team_records.content for record_type='training'. A finished preparation
-// can later seed that real record; not wired up in this pass. ----
+// ---- content shape (JME-60) — a clock-time schedule of blocks, each
+// with one or more items (a "stations" block runs several items in
+// parallel, e.g. one per goalkeeper station), matching the real paper
+// fitxa format rather than the old fixed 5-phase activation + up to 3
+// generic blocks. team_records' training shape (JME-42/58) stays on
+// the older flat shape deliberately — this schema is scoped to the
+// AI-assisted preparation flow and its PDF/email output only. ----
 
-export const ACTIVATION_PHASES = ["prevencion", "activacionPorteros", "activacionJugadores", "integrado", "participativo"] as const;
-export type ActivationPhase = (typeof ACTIVATION_PHASES)[number];
-export const ACTIVATION_LABELS: Record<ActivationPhase, string> = {
-  prevencion: "Prevenció",
-  activacionPorteros: "Activació porters",
-  activacionJugadores: "Activació jugadors",
-  integrado: "Integrat",
-  participativo: "Participatiu",
-};
+export const SCHEDULE_KINDS = ["simple", "stations", "match", "closing"] as const;
+export type ScheduleKind = (typeof SCHEDULE_KINDS)[number];
 
-const activationSchema = z.object({
-  prevencion: z.string().trim().max(500).default(""),
-  activacionPorteros: z.string().trim().max(500).default(""),
-  activacionJugadores: z.string().trim().max(500).default(""),
-  integrado: z.string().trim().max(500).default(""),
-  participativo: z.string().trim().max(500).default(""),
-});
-
-const blockSchema = z.object({
-  orderIndex: z.number().int().min(0),
-  description: z.string().trim().min(1).max(1_000),
-  diagramAssetUrl: z.string().trim().max(500).nullable().default(null),
+const scheduleItemSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  durationMinutes: z.number().int().positive().max(120),
+  detail: z.string().trim().max(1_500).nullable().default(null),
   exerciseId: z.string().uuid().nullable().default(null),
-  // JME-58: mirrors team_records' training blocks — set once the coach
-  // picks/confirms which content-catalog node this block delivers.
+  // JME-58: which content-catalog node this item delivers, and the
+  // coach's own call on how it went — same fields as team_records'
+  // training blocks, same purpose (feeds JME-59's coverage tracking).
   contentTaxonomyId: z.string().uuid().nullable().default(null),
   outcome: z.enum(["assolit", "cal_repetir"]).nullable().default(null),
 });
+export type ScheduleItem = z.infer<typeof scheduleItemSchema>;
+
+const scheduleBlockSchema = z.object({
+  label: z.string().trim().min(1).max(100),
+  durationMinutes: z.number().int().positive().max(180),
+  kind: z.enum(SCHEDULE_KINDS),
+  // "stations"/"match" run their items in parallel (e.g. two stations
+  // at once, or two simultaneous mini-matches); "simple"/"closing" run
+  // theirs in sequence. Never more than 4 — matches the paper fitxa's
+  // "un porter a cada estació" pattern, not an open-ended list.
+  items: z.array(scheduleItemSchema).min(1).max(4),
+});
+export type ScheduleBlock = z.infer<typeof scheduleBlockSchema>;
 
 export const trainingContentSchema = z.object({
   sessionNumber: z.number().int().positive().nullable().default(null),
   coach: z.string().trim().max(200).nullable().default(null),
   notes: z.string().trim().max(2_000).nullable().default(null),
-  activation: activationSchema,
-  blocks: z.array(blockSchema).min(1).max(3),
+  scheduleBlocks: z.array(scheduleBlockSchema).min(1).max(8),
+  whatToObserve: z.array(z.string().trim().min(1).max(300)).max(10).default([]),
+  closingNotes: z.string().trim().max(1_000).nullable().default(null),
 });
 export type TrainingContent = z.infer<typeof trainingContentSchema>;
 
-// ---- step derivation — order is computed from content, never stored ----
+export function allExerciseIds(content: TrainingContent): Array<string | null> {
+  return content.scheduleBlocks.flatMap((block) => block.items.map((item) => item.exerciseId));
+}
 
-export type Step = { kind: "activation"; phase: ActivationPhase } | { kind: "block"; index: number } | { kind: "review" };
+// ---- step derivation — order is computed from content, never stored.
+// One step per item (flattened across blocks), then a final review of
+// the whole schedule + whatToObserve/closingNotes. ----
+
+export type Step = { kind: "item"; blockIndex: number; itemIndex: number } | { kind: "review" };
 
 export function deriveSteps(content: TrainingContent): Step[] {
-  return [
-    ...ACTIVATION_PHASES.map((phase): Step => ({ kind: "activation", phase })),
-    ...content.blocks.map((_, index): Step => ({ kind: "block", index })),
-    { kind: "review" },
-  ];
+  const steps: Step[] = [];
+  content.scheduleBlocks.forEach((block, blockIndex) => {
+    block.items.forEach((_, itemIndex) => steps.push({ kind: "item", blockIndex, itemIndex }));
+  });
+  steps.push({ kind: "review" });
+  return steps;
 }
 
 export function totalSteps(content: TrainingContent): number {
@@ -205,17 +216,21 @@ export async function draftInitialContent(ai: ConfigurableAiService, context: Tr
     {
       role: "system",
       content:
-        "Ets un assistent que ajuda entrenadors d'hoquei patins a preparar una sessió d'entrenament. " +
+        "Ets un assistent que ajuda entrenadors d'hoquei patins a preparar una sessió d'entrenament, seguint " +
+        "el format d'una fitxa real: una franja horària de blocs (escalfament, exercicis, estacions " +
+        "simultànies, partit final, tancament). " +
         'Respon EXCLUSIVAMENT amb JSON vàlid amb aquesta forma exacta: {"sessionNumber": number, "coach": ' +
-        'string|null, "notes": string|null, "activation": {"prevencion": string, "activacionPorteros": ' +
-        'string, "activacionJugadores": string, "integrado": string, "participativo": string}, "blocks": ' +
-        '[{"orderIndex": number, "description": string, "diagramAssetUrl": null, "exerciseId": string|null, ' +
-        '"contentTaxonomyId": string|null}]}. ' +
-        "Entre 1 i 3 blocs. Si references un exercici del banc, usa el seu id exacte a exerciseId; si no n'hi " +
-        "ha cap adequat, deixa'l null i descriu-ho a description. Tria contentTaxonomyId del catàleg de " +
-        "continguts prioritzant els que la cobertura marca com a mai treballats o \"cal_repetir\"; si cap " +
-        "node del catàleg hi encaixa, deixa'l null. diagramAssetUrl sempre null (es gestiona fora d'aquest " +
-        "flux). Contingut en català.",
+        'string|null, "notes": string|null, "scheduleBlocks": [{"label": string, "durationMinutes": number, ' +
+        '"kind": "simple"|"stations"|"match"|"closing", "items": [{"title": string, "durationMinutes": ' +
+        'number, "detail": string|null, "exerciseId": string|null, "contentTaxonomyId": string|null}]}], ' +
+        '"whatToObserve": [string], "closingNotes": string|null}. ' +
+        "Entre 3 i 6 scheduleBlocks; \"stations\"/\"match\" tenen 2 items (corren en paral·lel, cadascun amb " +
+        "la seva pròpia durada i porter/estació); \"simple\"/\"closing\" normalment 1 item. Si un item " +
+        "references un exercici del banc, usa el seu id exacte a exerciseId; si no n'hi ha cap adequat, " +
+        "deixa'l null i descriu-ho a detail. Tria contentTaxonomyId del catàleg de continguts prioritzant " +
+        "els que la cobertura marca com a mai treballats o \"cal_repetir\"; si cap node hi encaixa, deixa'l " +
+        "null. whatToObserve són 3-6 punts curts que l'entrenador ha de vigilar durant la sessió. Contingut " +
+        "en català.",
     },
     { role: "user", content: contextPrompt(context) },
   ];
@@ -226,14 +241,13 @@ export async function draftInitialContent(ai: ConfigurableAiService, context: Tr
   return trainingContentSchema.parse(parseJsonResponse(result.content));
 }
 
-const activationValueSchema = z.object({ value: z.string().trim().max(500) });
-const blockValueSchema = z.object({
-  description: z.string().trim().min(1).max(1_000),
+const itemValueSchema = z.object({
+  detail: z.string().trim().max(1_500).nullable().default(null),
   exerciseId: z.string().uuid().nullable().default(null),
 });
 
-// One scoped AI call per refine round — only the targeted section's JSON is
-// requested/parsed, kept small and fast. Never touches any other section.
+// One scoped AI call per refine round — only the targeted item's JSON is
+// requested/parsed, kept small and fast. Never touches any other item.
 export async function refineSection(
   ai: ConfigurableAiService,
   content: TrainingContent,
@@ -243,63 +257,45 @@ export async function refineSection(
 ): Promise<TrainingContent> {
   if (step.kind === "review") throw new Error("REVIEW_STEP_HAS_NO_CONTENT");
 
-  if (step.kind === "activation") {
-    const current = content.activation[step.phase];
-    const messages: AiMessage[] = [
-      {
-        role: "system",
-        content:
-          "Ets un assistent que ajusta UNA fase d'activació d'un entrenament d'hoquei patins segons el " +
-          'feedback de l\'entrenador. Respon EXCLUSIVAMENT amb JSON: {"value": string}. Si el feedback demana ' +
-          'ometre la fase, retorna value buit ("").',
-      },
-      { role: "user", content: `Fase: ${step.phase}\nText actual: ${current || "(buit)"}\nFeedback de l'entrenador: ${instruction}` },
-    ];
-    const result = await ai.complete(messages, 45_000);
-    const { value } = activationValueSchema.parse(parseJsonResponse(result.content));
-    return { ...content, activation: { ...content.activation, [step.phase]: value } };
-  }
-
-  const block = content.blocks[step.index];
+  const item = content.scheduleBlocks[step.blockIndex].items[step.itemIndex];
   const messages: AiMessage[] = [
     {
       role: "system",
       content:
-        "Ets un assistent que ajusta UN bloc/exercici d'un entrenament d'hoquei patins segons el feedback de " +
-        'l\'entrenador. Respon EXCLUSIVAMENT amb JSON: {"description": string, "exerciseId": string|null}. Usa ' +
+        "Ets un assistent que ajusta UN element d'un entrenament d'hoquei patins segons el feedback de " +
+        'l\'entrenador. Respon EXCLUSIVAMENT amb JSON: {"detail": string|null, "exerciseId": string|null}. Usa ' +
         "un id exacte del banc d'exercicis si n'hi ha un d'adequat, si no deixa'l null.",
     },
     {
       role: "user",
       content:
-        `Bloc actual: ${JSON.stringify({ description: block.description, exerciseId: block.exerciseId })}\n` +
+        `Element actual: ${JSON.stringify({ title: item.title, detail: item.detail, exerciseId: item.exerciseId })}\n` +
         `Feedback de l'entrenador: ${instruction}\n` +
         `Banc d'exercicis disponible: ${JSON.stringify(candidateExercises)}`,
     },
   ];
   const result = await ai.complete(messages, 45_000);
-  const updated = blockValueSchema.parse(parseJsonResponse(result.content));
-  const blocks = content.blocks.map((existing, index) =>
-    index === step.index ? { ...existing, description: updated.description, exerciseId: updated.exerciseId } : existing,
-  );
-  return { ...content, blocks };
+  const updated = itemValueSchema.parse(parseJsonResponse(result.content));
+  return updateItem(content, step.blockIndex, step.itemIndex, (existing) => ({ ...existing, detail: updated.detail, exerciseId: updated.exerciseId }));
 }
 
 // ---- direct, non-AI edits (button/manual actions) ----
 
+function updateItem(content: TrainingContent, blockIndex: number, itemIndex: number, patch: (item: ScheduleItem) => ScheduleItem): TrainingContent {
+  const scheduleBlocks = content.scheduleBlocks.map((block, bi) =>
+    bi !== blockIndex ? block : { ...block, items: block.items.map((item, ii) => (ii === itemIndex ? patch(item) : item)) },
+  );
+  return { ...content, scheduleBlocks };
+}
+
 export function applyManualEdit(content: TrainingContent, step: Step, value: string): TrainingContent {
-  if (step.kind === "activation") return { ...content, activation: { ...content.activation, [step.phase]: value } };
-  if (step.kind === "block") {
-    const blocks = content.blocks.map((block, index) => (index === step.index ? { ...block, description: value } : block));
-    return { ...content, blocks };
-  }
-  throw new Error("REVIEW_STEP_HAS_NO_CONTENT");
+  if (step.kind !== "item") throw new Error("REVIEW_STEP_HAS_NO_CONTENT");
+  return updateItem(content, step.blockIndex, step.itemIndex, (item) => ({ ...item, detail: value }));
 }
 
 export function swapExercise(content: TrainingContent, step: Step, exerciseId: string | null): TrainingContent {
-  if (step.kind !== "block") throw new Error("SWAP_ONLY_VALID_FOR_BLOCKS");
-  const blocks = content.blocks.map((block, index) => (index === step.index ? { ...block, exerciseId } : block));
-  return { ...content, blocks };
+  if (step.kind !== "item") throw new Error("SWAP_ONLY_VALID_FOR_ITEMS");
+  return updateItem(content, step.blockIndex, step.itemIndex, (item) => ({ ...item, exerciseId }));
 }
 
 // ---- recipients + email content ----
@@ -330,16 +326,14 @@ export function buildEmailSubject(teamName: string, eventDate: string, content: 
 }
 
 export function buildEmailHtml(teamName: string, eventDate: string, content: TrainingContent): string {
-  const activationItems = ACTIVATION_PHASES.filter((phase) => content.activation[phase])
-    .map((phase) => `<li><strong>${ACTIVATION_LABELS[phase]}:</strong> ${escapeHtml(content.activation[phase])}</li>`)
+  const scheduleItems = content.scheduleBlocks
+    .map((block, index) => `<li>${index + 1}. <strong>${escapeHtml(block.label)}</strong> (${block.durationMinutes}')</li>`)
     .join("");
-  const blockItems = content.blocks.map((block, index) => `<li>${index + 1}. ${escapeHtml(block.description)}</li>`).join("");
   return (
     `<h1>${escapeHtml(teamName)} — Sessió ${content.sessionNumber ?? "?"}</h1>` +
     `<p>${escapeHtml(eventDate)}${content.coach ? ` · ${escapeHtml(content.coach)}` : ""}</p>` +
     (content.notes ? `<p>${escapeHtml(content.notes)}</p>` : "") +
-    (activationItems ? `<h2>Activació</h2><ul>${activationItems}</ul>` : "") +
-    `<h2>Blocs</h2><ol>${blockItems}</ol>` +
+    `<h2>Franja horària</h2><ol>${scheduleItems}</ol>` +
     `<p>Detall complet a la fitxa adjunta en PDF.</p>`
   );
 }

@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ACTIVATION_LABELS, ACTIVATION_PHASES, api, Category, ConflictDetail, ContentTaxonomyNode, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, ManagedUser, Player, RecordInput, RefineAction, RosterEntry, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
+import { api, Category, ConflictDetail, ContentTaxonomyNode, CoordinatorMatch, CoordinatorOverview, CurrentUser, derivePreparationSteps, EventAction, EventReadiness, EventTypeActionTemplate, Exercise, ManagedUser, Player, RecordInput, RefineAction, RosterEntry, SCHEDULE_KIND_LABELS, Team, TeamEvent, TeamPlan, TrainingPreparation, TrainingSeries } from "./api";
 import { loginWithPasskey, passkeysAvailable, registerPasskey } from "./webauthn";
 import "./styles.css";
 
@@ -606,13 +606,12 @@ function EventEditor({ token, teamId, onClose, onSaved }: { token: string; teamI
   </section></div>;
 }
 
-const PHASE_QUICK_OPTIONS = ["Escurça-ho", "Allarga-ho", "Canvia l'enfocament"];
-const BLOCK_QUICK_OPTIONS = ["Fes-ho més senzill", "Fes-ho més difícil", "Escurça-ho", "Allarga-ho", "Afegeix una variant"];
+const ITEM_QUICK_OPTIONS = ["Fes-ho més senzill", "Fes-ho més difícil", "Escurça-ho", "Allarga-ho", "Afegeix una variant"];
 
-// JME-44: drafts, then walks the coach through approving one activation
-// phase / block at a time (never a free-form chat) before generating the
-// one-page PDF and emailing it. See docs/ficha-entreno-schema.md for the
-// content shape and apps/api/src/training-preparation.ts for step order.
+// JME-60: drafts, then walks the coach through approving one schedule
+// item at a time (never a free-form chat) before generating the
+// one-page PDF and emailing it. See apps/api/src/training-preparation.ts
+// for the schedule-block/item content shape and step order.
 function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }: { token: string; teamId: string; eventId: string; teamName: string; onClose: () => void }) {
   const [prep, setPrep] = useState<TrainingPreparation | null>(null);
   const [loading, setLoading] = useState(true);
@@ -622,7 +621,7 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [sentTo, setSentTo] = useState<string[] | null>(null);
-  const [header, setHeader] = useState({ sessionNumber: "", coach: "", notes: "" });
+  const [header, setHeader] = useState({ sessionNumber: "", coach: "", notes: "", whatToObserve: "", closingNotes: "" });
   const [manualText, setManualText] = useState("");
 
   useEffect(() => {
@@ -652,13 +651,15 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
   const steps = content ? derivePreparationSteps(content) : [];
   const step = content && prep ? steps[prep.current_step] : null;
   const isReview = step?.kind === "review";
-  const currentText = content && step
-    ? step.kind === "activation" ? content.activation[step.phase] : step.kind === "block" ? content.blocks[step.index].description : ""
-    : "";
+  const currentItem = content && step?.kind === "item" ? content.scheduleBlocks[step.blockIndex].items[step.itemIndex] : null;
+  const currentText = currentItem?.detail ?? "";
 
   useEffect(() => {
-    if (content) setHeader({ sessionNumber: content.sessionNumber?.toString() ?? "", coach: content.coach ?? "", notes: content.notes ?? "" });
-  }, [content?.sessionNumber, content?.coach, content?.notes]);
+    if (content) setHeader({
+      sessionNumber: content.sessionNumber?.toString() ?? "", coach: content.coach ?? "", notes: content.notes ?? "",
+      whatToObserve: content.whatToObserve.join("\n"), closingNotes: content.closingNotes ?? "",
+    });
+  }, [content?.sessionNumber, content?.coach, content?.notes, content?.whatToObserve, content?.closingNotes]);
   useEffect(() => { setManualText(currentText); }, [currentText]);
 
   async function saveHeader() {
@@ -669,6 +670,8 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
         sessionNumber: header.sessionNumber ? Number(header.sessionNumber) : null,
         coach: header.coach || null,
         notes: header.notes || null,
+        whatToObserve: header.whatToObserve.split("\n").map((item) => item.trim()).filter(Boolean),
+        closingNotes: header.closingNotes || null,
       }));
     } catch { setError("No s'ha pogut desar la capçalera."); }
   }
@@ -678,16 +681,6 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
     setBusy(true); setError(""); setFeedback("");
     try { setPrep(await api.refinePreparationStep(token, teamId, eventId, prep.current_step, action)); }
     catch { setError("No s'ha pogut aplicar el canvi."); }
-    finally { setBusy(false); }
-  }
-
-  async function skip() {
-    if (!prep) return;
-    setBusy(true); setError("");
-    try {
-      const edited = await api.refinePreparationStep(token, teamId, eventId, prep.current_step, { action: "edit", value: "" });
-      setPrep(await api.refinePreparationStep(token, teamId, eventId, edited.current_step, { action: "approve" }));
-    } catch { setError("No s'ha pogut saltar la fase."); }
     finally { setBusy(false); }
   }
 
@@ -727,16 +720,17 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
         <label>Entrenador<input value={header.coach} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, coach: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
       </div>
       <label>Notes<textarea value={header.notes} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, notes: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
+      <label>Què observar (una línia per punt)<textarea value={header.whatToObserve} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, whatToObserve: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
+      <label>Notes de tancament<textarea value={header.closingNotes} disabled={prep.status !== "drafting"} onChange={(evt) => setHeader((current) => ({ ...current, closingNotes: evt.target.value }))} onBlur={() => void saveHeader()} /></label>
 
-      {prep.status === "drafting" && step && !isReview && <div className="prep-step">
+      {prep.status === "drafting" && step && step.kind === "item" && currentItem && <div className="prep-step">
         <p className="prep-progress">Pas {prep.current_step + 1} de {totalVisibleSteps}</p>
         <div className="progress-track"><div className="progress-fill" style={{ width: `${((prep.current_step + 1) / totalVisibleSteps) * 100}%` }} /></div>
-        <h3>{step.kind === "activation" ? ACTIVATION_LABELS[step.phase] : `Bloc ${step.index + 1}`}</h3>
+        <h3>{content.scheduleBlocks[step.blockIndex].label} · {currentItem.title} ({currentItem.durationMinutes}')</h3>
         <textarea value={manualText} onChange={(evt) => setManualText(evt.target.value)} disabled={busy} />
-        {step.kind === "block" && <label>Exercici del banc<select value={content.blocks[step.index].exerciseId ?? ""} disabled={busy} onChange={(evt) => void apply({ action: "swap_exercise", exerciseId: evt.target.value || null })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label>}
+        <label>Exercici del banc<select value={currentItem.exerciseId ?? ""} disabled={busy} onChange={(evt) => void apply({ action: "swap_exercise", exerciseId: evt.target.value || null })}><option value="">— Cap —</option>{exercises.map((exercise) => <option key={exercise.id} value={exercise.id}>{exercise.name}</option>)}</select></label>
         <div className="prep-options">
-          {(step.kind === "activation" ? PHASE_QUICK_OPTIONS : BLOCK_QUICK_OPTIONS).map((option) => <button key={option} type="button" className="text-action prep-chip" disabled={busy} onClick={() => void apply({ action: "feedback", instruction: option })}>{option}</button>)}
-          {step.kind === "activation" && <button type="button" className="text-action prep-chip" disabled={busy} onClick={() => void skip()}>Salta aquesta fase</button>}
+          {ITEM_QUICK_OPTIONS.map((option) => <button key={option} type="button" className="text-action prep-chip" disabled={busy} onClick={() => void apply({ action: "feedback", instruction: option })}>{option}</button>)}
         </div>
         <div className="prep-feedback"><input value={feedback} onChange={(evt) => setFeedback(evt.target.value)} placeholder="Escriu el teu propi feedback…" disabled={busy} /><button type="button" className="quiet" disabled={busy || !feedback.trim()} onClick={() => void apply({ action: "feedback", instruction: feedback })}>Envia</button></div>
         <div className="dialog-actions">
@@ -748,8 +742,11 @@ function TrainingPreparationModal({ token, teamId, eventId, teamName, onClose }:
 
       {prep.status === "drafting" && isReview && <div className="prep-step">
         <h3>Revisió final</h3>
-        <ul className="prep-summary">{ACTIVATION_PHASES.filter((phase) => content.activation[phase]).map((phase) => <li key={phase}><strong>{ACTIVATION_LABELS[phase]}:</strong> {content.activation[phase]}</li>)}</ul>
-        <ol className="prep-summary">{content.blocks.map((block, index) => <li key={index}>{block.description}{block.exerciseId && ` (${exercises.find((exercise) => exercise.id === block.exerciseId)?.name ?? ""})`}</li>)}</ol>
+        {content.scheduleBlocks.map((block, blockIndex) => <div key={blockIndex} className="prep-summary-block">
+          <strong>{block.label} — {SCHEDULE_KIND_LABELS[block.kind]}, {block.durationMinutes}'</strong>
+          <ol className="prep-summary">{block.items.map((item, itemIndex) => <li key={itemIndex}>{item.title} ({item.durationMinutes}'){item.exerciseId && ` — ${exercises.find((exercise) => exercise.id === item.exerciseId)?.name ?? ""}`}{item.detail && <><br />{item.detail}</>}</li>)}</ol>
+        </div>)}
+        {content.whatToObserve.length > 0 && <div className="prep-summary-block"><strong>Què observar</strong><ul className="prep-summary">{content.whatToObserve.map((point, index) => <li key={index}>{point}</li>)}</ul></div>}
         <div className="dialog-actions"><button type="button" className="quiet" disabled={busy} onClick={() => void apply({ action: "back" })}>Anterior</button><button type="button" disabled={busy} onClick={() => void finalize()}>Finalitza</button></div>
       </div>}
 

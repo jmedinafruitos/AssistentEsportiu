@@ -41,29 +41,37 @@ export type TeamRecord = {
     | { sessionNumber: number | null; coach: string | null; notes: string | null; activation: TrainingActivation; blocks: TrainingBlock[] };
   created_at: string; created_by_name?: string;
 };
-// JME-44: AI-assisted training-session preparation. Step order mirrors
-// apps/api/src/training-preparation.ts's deriveSteps exactly — 5 fixed
-// activation phases, then one entry per draft block, then "review".
-export const ACTIVATION_PHASES = ["prevencion", "activacionPorteros", "activacionJugadores", "integrado", "participativo"] as const;
-export type ActivationPhase = (typeof ACTIVATION_PHASES)[number];
-export const ACTIVATION_LABELS: Record<ActivationPhase, string> = {
-  prevencion: "Prevenció", activacionPorteros: "Activació porters", activacionJugadores: "Activació jugadors",
-  integrado: "Integrat", participativo: "Participatiu",
+// JME-60: AI-assisted training-session preparation, matching the real
+// paper fitxa's clock-time schedule of blocks (each with 1+ items —
+// "stations"/"match" blocks run several in parallel) instead of the
+// old fixed 5-phase activation + up to 3 generic blocks. Step order
+// mirrors apps/api/src/training-preparation.ts's deriveSteps exactly:
+// one step per item (flattened across blocks), then "review".
+export const SCHEDULE_KINDS = ["simple", "stations", "match", "closing"] as const;
+export type ScheduleKind = (typeof SCHEDULE_KINDS)[number];
+export const SCHEDULE_KIND_LABELS: Record<ScheduleKind, string> = {
+  simple: "Bloc simple", stations: "Estacions simultànies", match: "Partit", closing: "Tancament",
 };
-export type PreparationStep = { kind: "activation"; phase: ActivationPhase } | { kind: "block"; index: number } | { kind: "review" };
-export function derivePreparationSteps(content: PreparationContent): PreparationStep[] {
-  return [
-    ...ACTIVATION_PHASES.map((phase): PreparationStep => ({ kind: "activation", phase })),
-    ...content.blocks.map((_, index): PreparationStep => ({ kind: "block", index })),
-    { kind: "review" },
-  ];
-}
-export type PreparationBlock = { orderIndex: number; description: string; diagramAssetUrl: string | null; exerciseId: string | null; contentTaxonomyId: string | null; outcome: "assolit" | "cal_repetir" | null };
+export type PreparationItem = {
+  title: string; durationMinutes: number; detail: string | null;
+  exerciseId: string | null; contentTaxonomyId: string | null; outcome: "assolit" | "cal_repetir" | null;
+};
+export type PreparationBlock = { label: string; durationMinutes: number; kind: ScheduleKind; items: PreparationItem[] };
 export type PreparationContent = {
   sessionNumber: number | null; coach: string | null; notes: string | null;
-  activation: Record<ActivationPhase, string>;
-  blocks: PreparationBlock[];
+  scheduleBlocks: PreparationBlock[];
+  whatToObserve: string[];
+  closingNotes: string | null;
 };
+export type PreparationStep = { kind: "item"; blockIndex: number; itemIndex: number } | { kind: "review" };
+export function derivePreparationSteps(content: PreparationContent): PreparationStep[] {
+  const steps: PreparationStep[] = [];
+  content.scheduleBlocks.forEach((block, blockIndex) => {
+    block.items.forEach((_, itemIndex) => steps.push({ kind: "item", blockIndex, itemIndex }));
+  });
+  steps.push({ kind: "review" });
+  return steps;
+}
 export type TrainingPreparation = { id: string; status: "drafting" | "ready" | "sent"; draft_content: PreparationContent; current_step: number };
 export type RefineAction =
   | { action: "approve" }
@@ -215,7 +223,7 @@ export const api = {
     request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation`, {}, token),
   startPreparation: (token: string, teamId: string, eventId: string) =>
     request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation`, { method: "POST" }, token),
-  updatePreparationHeader: (token: string, teamId: string, eventId: string, header: { sessionNumber?: number | null; coach?: string | null; notes?: string | null }) =>
+  updatePreparationHeader: (token: string, teamId: string, eventId: string, header: { sessionNumber?: number | null; coach?: string | null; notes?: string | null; whatToObserve?: string[]; closingNotes?: string | null }) =>
     request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation/header`, { method: "PATCH", body: JSON.stringify(header) }, token),
   refinePreparationStep: (token: string, teamId: string, eventId: string, step: number, action: RefineAction) =>
     request<TrainingPreparation>(`/v1/teams/${teamId}/events/${eventId}/preparation/steps/${step}`, { method: "POST", body: JSON.stringify(action) }, token),
